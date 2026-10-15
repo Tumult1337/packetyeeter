@@ -79,14 +79,18 @@ func (m *Maps) BlockIP(ip net.IP, reason string, meta logrus.Fields) error {
 }
 
 func (m *Maps) UnblockIP(ip net.IP) error {
+	var err error
 	if ip4 := ip.To4(); ip4 != nil {
-		key := binary.LittleEndian.Uint32(ip4)
-		return m.BlockedIPs.Delete(key)
+		err = m.BlockedIPs.Delete(binary.LittleEndian.Uint32(ip4))
 	} else {
 		var key [16]byte
 		copy(key[:], ip.To16())
-		return m.BlockedIPsV6.Delete(key)
+		err = m.BlockedIPsV6.Delete(key)
 	}
+	if errors.Is(err, ebpf.ErrKeyNotExist) {
+		return nil
+	}
+	return err
 }
 
 type MonotonicClock func() (uint64, error)
@@ -101,7 +105,7 @@ func MonotonicNowNs() (uint64, error) {
 
 func blockRemaining(now, blockedAt uint64, blockDuration time.Duration) (time.Duration, bool) {
 	if blockDuration <= 0 {
-		return 0, blockedAt >= now
+		return 0, true
 	}
 	if blockedAt >= now {
 		return blockDuration, true
@@ -117,6 +121,17 @@ func blockRemaining(now, blockedAt uint64, blockDuration time.Duration) (time.Du
 func blockExpired(now, blockedAt uint64, blockDuration time.Duration) bool {
 	_, active := blockRemaining(now, blockedAt, blockDuration)
 	return !active
+}
+
+func remainingTTL(now, blockedAt uint64, blockDuration time.Duration) string {
+	if blockDuration <= 0 {
+		return "permanent"
+	}
+	remaining, active := blockRemaining(now, blockedAt, blockDuration)
+	if !active {
+		return "expired"
+	}
+	return remaining.Round(time.Second).String()
 }
 
 type BlockedIPInfo struct {
@@ -157,11 +172,7 @@ func listBlocks[K blockKey](m blockMap, toAddr func(K) netip.Addr, now uint64, b
 	var blockedAt uint64
 	iter := m.iterate()
 	for iter.Next(&key, &blockedAt) {
-		ttl := "expired"
-		if remaining, active := blockRemaining(now, blockedAt, blockDuration); active {
-			ttl = remaining.Round(time.Second).String()
-		}
-		infos = append(infos, BlockedIPInfo{IP: toAddr(key).String(), RemainingTTL: ttl})
+		infos = append(infos, BlockedIPInfo{IP: toAddr(key).String(), RemainingTTL: remainingTTL(now, blockedAt, blockDuration)})
 	}
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("iterate %s: %w", m, err)

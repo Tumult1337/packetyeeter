@@ -263,3 +263,34 @@ func TestListBlocksReturnsIteratorError(t *testing.T) {
 		t.Fatalf("err = %v, want %v", err, iterErr)
 	}
 }
+
+func TestNonPositiveBlockDurationIsPermanent(t *testing.T) {
+	const now = uint64(1000 * time.Second)
+	for _, duration := range []time.Duration{0, -time.Minute} {
+		t.Run(duration.String(), func(t *testing.T) {
+			v4 := newFakeBlockMap[uint32]()
+			v4.put(v4Key(t, "198.51.100.7"), 1)
+			v4.put(v4Key(t, "198.51.100.8"), now+5)
+			v6 := newFakeBlockMap[[16]byte]()
+			v6.put(netip.MustParseAddr("2001:db8::1").As16(), 1)
+
+			expired, err := collectExpiredBlocks(v4, v6, fixedClock(now), duration)
+			if err != nil {
+				t.Fatalf("collectExpiredBlocks: %v", err)
+			}
+			if len(expired) != 0 {
+				t.Fatalf("expired = %v, want none", expired)
+			}
+
+			infos, err := listBlocks(v4, v4KeyAddr, now, duration)
+			if err != nil {
+				t.Fatalf("listBlocks: %v", err)
+			}
+			for _, info := range infos {
+				if info.RemainingTTL != "permanent" {
+					t.Fatalf("RemainingTTL for %s = %q, want permanent", info.IP, info.RemainingTTL)
+				}
+			}
+		})
+	}
+}
