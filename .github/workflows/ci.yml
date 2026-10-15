@@ -85,6 +85,40 @@ jobs:
           cache-from: type=gha,scope=collector
           cache-to: type=gha,mode=max,scope=collector
 
+  proto-compat:
+    # buf lint plus buf breaking against the PR base (or, on push, the
+    # previous main commit) so wire/JSON/generated-code breaks in the v1
+    # gRPC API fail CI. See docs/compatibility.md.
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install protobuf tools
+        run: make install-buf
+
+      - name: Lint protobuf
+        run: make proto-lint
+
+      - name: Check protobuf breaking changes
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "No base commit to compare against; skipping buf breaking."
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          make proto-breaking PROTO_AGAINST_REF="$BASE_SHA"
+
   e2e-haproxy:
     # See build-test's comment: tags are cut from already-tested main
     # commits, so skip re-running e2e suites on tag push.

@@ -6,6 +6,8 @@ BUF_VERSION ?= v1.65.0
 PROTOC_GEN_GO_VERSION ?= v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.0
 NFPM ?= $(GO_BIN)/nfpm
+# Git ref the proto-breaking check compares api/proto against.
+PROTO_AGAINST_REF ?= origin/main
 NFPM_VERSION ?= v2.41.1
 
 BPF_SRC := pkg/collector/ebpf/c/protector.bpf.c
@@ -24,7 +26,7 @@ LDFLAGS := -s -w \
 	-X PacketYeeter/pkg/buildinfo.Commit=$(COMMIT) \
 	-X PacketYeeter/pkg/buildinfo.BuildDate=$(BUILD_DATE)
 
-.PHONY: all proto bpf collector analyzer yeetctl clean install-buf install-nfpm deps lint test portable-test e2e-test e2e-ebpf-test e2e-scrub-test bench-scrub-veth linux install-services run-collector run-analyzer dist-binaries packages
+.PHONY: all proto proto-lint proto-breaking bpf collector analyzer yeetctl clean install-buf install-nfpm deps lint test portable-test e2e-test e2e-ebpf-test e2e-scrub-test bench-scrub-veth linux install-services run-collector run-analyzer dist-binaries packages
 
 # Default target
 all: proto collector analyzer
@@ -35,6 +37,17 @@ proto:
 	cd api/proto && PATH="$(GO_BIN):$$PATH" $(BUF) generate
 	@echo "Verifying generated files exist..."
 	ls -la api/proto/v1/*.pb.go
+
+# Lint api/proto with buf (rules and v1 exceptions in api/proto/buf.yaml).
+proto-lint:
+	cd api/proto && $(BUF) lint
+
+# Fail if api/proto has wire, JSON or generated-code breaking changes
+# compared with PROTO_AGAINST_REF (default origin/main).
+proto-breaking:
+	@tmp=$$(mktemp -d) && trap 'rm -rf "$$tmp"' EXIT && \
+	git archive "$(PROTO_AGAINST_REF)" api/proto | tar -x -C "$$tmp" && \
+	cd api/proto && $(BUF) breaking --against "$$tmp/api/proto"
 
 # Compile the eBPF object embedded by pkg/collector/ebpf/loader.go.
 bpf: $(BPF_OBJ)
@@ -79,7 +92,7 @@ test: proto
 
 # Run portable tests that do not require Linux eBPF support.
 portable-test: proto
-	$(GO) test -v ./pkg/analyzer/... ./pkg/ml/... ./pkg/integration_test ./pkg/collector ./pkg/grpctls/... ./pkg/nic ./cmd/yeetctl
+	$(GO) test -v ./pkg/analyzer/... ./pkg/ml/... ./pkg/integration_test ./pkg/collector ./pkg/grpctls/... ./pkg/nic ./pkg/metrics ./pkg/collector/ebpf ./cmd/yeetctl
 
 # Run end-to-end tests that spawn a real haproxy binary to validate the
 # collector's SPOE agent against actual haproxy wire behavior. Requires

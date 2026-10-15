@@ -136,6 +136,7 @@ PacketYeeter is a high-performance, eBPF-based DDoS protection and traffic filte
 *   [`SECURITY.md`](SECURITY.md): private vulnerability reporting guidance.
 *   [`docs/operations.md`](docs/operations.md): deployment, listener exposure, systemd, and rollout guidance.
 *   [`docs/troubleshooting.md`](docs/troubleshooting.md): common eBPF, build, and runtime issues.
+*   [`docs/compatibility.md`](docs/compatibility.md): stable compatibility surface (gRPC API, metrics, flags, HTTP routes, state formats) and the checks that guard it.
 
 ## Architecture
 
