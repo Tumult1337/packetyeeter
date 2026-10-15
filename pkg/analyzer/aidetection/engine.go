@@ -2058,6 +2058,9 @@ func blendMLConfidence(ruleConfidence float64, prediction MLPredictionResult) fl
 	mlConfidence := clampConfidence(prediction.Confidence)
 	ruleConfidence = clampConfidence(ruleConfidence)
 
+	if prediction.NoVerdict {
+		return ruleConfidence
+	}
 	if prediction.IsBot {
 		return math.Max(ruleConfidence, mlConfidence)
 	}
@@ -2406,14 +2409,17 @@ func (e *Engine) handleDetection(key string, signals []Signal, ewmaBaseline, con
 	var mlModelTier string     // Track which tier was used: "pattern", "onnx", "statistical"
 	var ruleConfidence float64 // Store rule-based confidence for display only
 	var feedbackFeatures *MLFeatures
+	var prediction MLPredictionResult
 
 	if e.mlModel != nil {
 		mlFeatures := e.extractMLFeatures(signals, signalTypes, sources, behavioralProfile, reputationScore)
 		feedbackFeatures = compactMLFeatures(&mlFeatures)
 
 		// Use ML model for prediction
-		prediction := e.mlModel.Predict(mlFeatures)
+		prediction = e.mlModel.Predict(mlFeatures)
+	}
 
+	if e.mlModel != nil && !prediction.NoVerdict {
 		mlConfidence = prediction.Confidence
 		mlCategory = prediction.Category
 		mlModelTier = prediction.ModelTier // Track which tier was used

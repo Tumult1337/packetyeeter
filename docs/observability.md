@@ -126,6 +126,11 @@ behavior) alongside `Tau` and `AnomalyMultiplier`.
 - **ML/Bot/JA4DB**: `packetyeeter_ml_*`,
   `packetyeeter_bot_detections_by_category_total`,
   `packetyeeter_bot_verification_*`, `packetyeeter_ja4db_*`.
+  `packetyeeter_ml_no_verdict_total` counts ONNX predictions skipped because
+  the input cannot be built for the model feature layout (for example, a 116
+  or 126-feature model with no event history). In the AI engine, the
+  deterministic rules then decide alone. At the reputation-block gate, the
+  block is vetoed and `packetyeeter_ml_blocks_overridden_total` increments.
 - **Bot verification pool**: DNS verification of claimed crawlers runs off the
   signal stream (see `docs/operations.md#bot-verification`).
   `packetyeeter_bot_verification_queue_depth` is the number of lookups waiting

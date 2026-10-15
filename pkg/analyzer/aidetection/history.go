@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+var historyMetadataKeys = map[string]struct{}{
+	"path": {}, "method": {}, "user_agent": {}, "referer": {},
+	"accept_language": {}, "status_code": {}, "ja4": {}, "ja4h": {}, "ja4t": {},
+	"ttl": {}, "window_size": {}, "entropy_score": {}, "tcp_timestamp": {},
+}
+
 // EventHistory maintains a sliding window of recent events for feature extraction
 type EventHistory struct {
 	mu          sync.RWMutex
@@ -45,10 +51,7 @@ func (h *EventHistory) AddEvent(event SignalEvent) {
 		h.lastCleanup = now
 	}
 
-	event.Metadata = cloneMetadata(event.Metadata, map[string]struct{}{
-		"path": {}, "method": {}, "user_agent": {}, "referer": {},
-		"accept_language": {}, "status_code": {}, "ja4": {}, "ja4h": {}, "ja4t": {},
-	})
+	event.Metadata = cloneMetadata(event.Metadata, historyMetadataKeys)
 	if len(h.events) == h.maxEvents {
 		copy(h.events, h.events[1:])
 		h.events[len(h.events)-1] = event

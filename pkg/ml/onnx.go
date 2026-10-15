@@ -1,16 +1,24 @@
 package ml
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	onnxruntime "github.com/yalue/onnxruntime_go"
 
 	"PacketYeeter/pkg/analyzer/aidetection"
+	"PacketYeeter/pkg/metrics"
 )
+
+const noVerdictLogInterval = time.Minute
+
+var errNoFeatureLayout = errors.New("input cannot be built for the model feature layout")
 
 // ONNXModel wraps an ONNX model for inference using onnxruntime
 type ONNXModel struct {
@@ -20,6 +28,8 @@ type ONNXModel struct {
 	nFeatures   int
 	threshold   float64
 	outputNames []string // Track which outputs the model actually has
+
+	lastNoVerdictLogNanos atomic.Int64
 }
 
 // LoadONNXModel loads an ONNX model from disk
@@ -44,8 +54,11 @@ func (m *ONNXModel) Predict(features aidetection.MLFeatures) aidetection.MLPredi
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Convert features to float32 tensor
-	inputData := m.featuresToTensor(features)
+	inputData, err := m.featuresToTensor(features)
+	if err != nil {
+		m.recordNoVerdict(time.Now(), err)
+		return aidetection.MLPredictionResult{NoVerdict: true}
+	}
 
 	// Create input tensor
 	inputShape := onnxruntime.NewShape(1, int64(m.nFeatures))
@@ -219,6 +232,24 @@ func (m *ONNXModel) calibrateConfidence(rawConfidence float64, features aidetect
 	return calibrated
 }
 
+func (m *ONNXModel) recordNoVerdict(now time.Time, err error) {
+	metrics.MLNoVerdict.Inc()
+	if !m.allowNoVerdictLog(now) {
+		return
+	}
+	logrus.WithError(err).WithField("n_features", m.nFeatures).Warn(
+		"ML model skipped: no ML verdict, deterministic rules decide alone")
+}
+
+func (m *ONNXModel) allowNoVerdictLog(now time.Time) bool {
+	nowNanos := now.UnixNano()
+	lastNanos := m.lastNoVerdictLogNanos.Load()
+	if lastNanos != 0 && nowNanos-lastNanos < int64(noVerdictLogInterval) {
+		return false
+	}
+	return m.lastNoVerdictLogNanos.CompareAndSwap(lastNanos, nowNanos)
+}
+
 // fallbackPredict uses simple threshold model if ONNX fails
 func (m *ONNXModel) fallbackPredict(features aidetection.MLFeatures) aidetection.MLPredictionResult {
 	logrus.Debug("Using fallback threshold model for prediction")
@@ -247,14 +278,22 @@ func (m *ONNXModel) Close() error {
 
 // featuresToTensor converts MLFeatures to flat float32 slice
 // Order MUST match training feature order in train_model.py!
-func (m *ONNXModel) featuresToTensor(features aidetection.MLFeatures) []float32 {
-	// Check if we should use advanced features (100+ feature model)
-	if m.nFeatures >= 100 && features.EventHistory != nil {
-		return m.featuresToTensorAdvanced(features)
+func (m *ONNXModel) featuresToTensor(features aidetection.MLFeatures) ([]float32, error) {
+	switch m.nFeatures {
+	case 116, 126:
+		if features.EventHistory == nil {
+			return nil, fmt.Errorf("%d-feature model needs event history: %w", m.nFeatures, errNoFeatureLayout)
+		}
+		return m.featuresToTensorAdvanced(features), nil
+	case 41:
+		tensor := m.featuresToTensorLegacy(features)
+		if len(tensor) != m.nFeatures {
+			return nil, fmt.Errorf("legacy vector has %d features, model expects %d: %w", len(tensor), m.nFeatures, errNoFeatureLayout)
+		}
+		return tensor, nil
+	default:
+		return nil, fmt.Errorf("%d-feature model: %w", m.nFeatures, errNoFeatureLayout)
 	}
-
-	// Fall back to legacy 41-feature extraction
-	return m.featuresToTensorLegacy(features)
 }
 
 // featuresToTensorAdvanced builds the advanced feature vector. Only two widths
@@ -267,25 +306,11 @@ func (m *ONNXModel) featuresToTensor(features aidetection.MLFeatures) []float32 
 //	116 - advanced layout without the fingerprint block, detection features
 //	      overlaid at [95:100]
 //
-// LoadONNXModel refuses any other width, so featuresToTensorAdvanced is only
-// ever reached with nFeatures 116 or 126. The default branch is defensive: it
-// never fabricates a truncated/misaligned vector (which would feed corrupted
-// inputs into an enforcement model). It returns an all-zero tensor of the
-// requested length and logs, so the failure is observable rather than silent.
+// featuresToTensor calls featuresToTensorAdvanced only with nFeatures 116 or
+// 126 and a non-nil EventHistory.
 func (m *ONNXModel) featuresToTensorAdvanced(features aidetection.MLFeatures) []float32 {
 	// Allocate based on model's actual feature count
 	tensor := make([]float32, m.nFeatures)
-
-	if features.EventHistory == nil {
-		logrus.Warn("Advanced feature extraction requested but no event history available")
-		return tensor // Return zeros
-	}
-
-	if m.nFeatures != 126 && m.nFeatures != 116 {
-		logrus.WithField("n_features", m.nFeatures).Error(
-			"CRITICAL: advanced feature extraction reached with an unsupported width; returning zero features to avoid misaligned inputs")
-		return tensor
-	}
 
 	extractor := &AdvancedFeatureExtractor{}
 
@@ -471,32 +496,6 @@ func (m *ONNXModel) featuresToTensorLegacy(features aidetection.MLFeatures) []fl
 
 	// Total features: 3 (core) + 16 (signals) + 5 (sources) + 5 (derived) + 6 (threat_intel) + 3 (behavioral) + 3 (temporal) = 41 features
 	// This matches train_model.py extract_features() exactly
-
-	// Validation: ensure we generated exactly the expected number of features
-	if len(tensor) != m.nFeatures {
-		sampleSize := 10
-		if len(tensor) < sampleSize {
-			sampleSize = len(tensor)
-		}
-		logrus.WithFields(logrus.Fields{
-			"expected":      m.nFeatures,
-			"got":           len(tensor),
-			"signal_count":  features.SignalCount,
-			"signal_rate":   features.SignalRate,
-			"threat_score":  features.ThreatScore,
-			"tensor_sample": tensor[:sampleSize],
-		}).Error("CRITICAL: Feature count mismatch! Model will produce incorrect predictions!")
-		// Pad or truncate to avoid crashes, but this indicates a bug
-		if len(tensor) < m.nFeatures {
-			// Pad with zeros
-			for i := len(tensor); i < m.nFeatures; i++ {
-				tensor = append(tensor, 0.0)
-			}
-		} else {
-			// Truncate
-			tensor = tensor[:m.nFeatures]
-		}
-	}
 
 	return tensor
 }

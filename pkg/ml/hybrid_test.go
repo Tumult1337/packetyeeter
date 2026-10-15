@@ -1,6 +1,7 @@
 package ml
 
 import (
+	"sync"
 	"testing"
 
 	"PacketYeeter/pkg/analyzer/aidetection"
@@ -70,6 +71,30 @@ func TestHybridModelPredictUsesPatternMatchWhenFound(t *testing.T) {
 	if !result.IsBot {
 		t.Fatalf("expected IsBot=true for malicious pattern match")
 	}
+}
+
+func TestHybridModelSetPatternCheckerConcurrentWithPredict(t *testing.T) {
+	h, err := NewHybridModel("", 0.5)
+	if err != nil {
+		t.Fatalf("NewHybridModel: %v", err)
+	}
+	features := aidetection.MLFeatures{UserAgent: "curl/8.0", JA4H: "abc123"}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			h.SetPatternChecker(&fakePatternChecker{})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			_ = h.Predict(features)
+		}
+	}()
+	wg.Wait()
 }
 
 func TestNewHybridModelRejectsConfiguredMissingModel(t *testing.T) {

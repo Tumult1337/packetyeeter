@@ -1,10 +1,15 @@
 package ml
 
 import (
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"PacketYeeter/pkg/analyzer/aidetection"
+	"PacketYeeter/pkg/metrics"
 )
 
 // sampleFeaturesWithHistory builds an MLFeatures with a populated EventHistory
@@ -47,7 +52,7 @@ func sampleFeaturesWithHistory() aidetection.MLFeatures {
 func TestFeaturesToTensorAdvanced_126IndexSemantics(t *testing.T) {
 	features := sampleFeaturesWithHistory()
 	m := &ONNXModel{nFeatures: 126}
-	tensor := m.featuresToTensor(features)
+	tensor := mustFeaturesToTensor(t, m, features)
 
 	if len(tensor) != 126 {
 		t.Fatalf("tensor length = %d, want 126", len(tensor))
@@ -85,7 +90,7 @@ func TestFeaturesToTensorAdvanced_126SentinelZeroFlags(t *testing.T) {
 	features.JA4T = ""
 	features.WouldBlock = false
 	m := &ONNXModel{nFeatures: 126}
-	tensor := m.featuresToTensor(features)
+	tensor := mustFeaturesToTensor(t, m, features)
 
 	if tensor[117] != 0 {
 		t.Errorf("tensor[117] (would_block) = %v, want 0", tensor[117])
@@ -107,7 +112,7 @@ func TestFeaturesToTensorAdvanced_126SentinelZeroFlags(t *testing.T) {
 func TestFeaturesToTensorAdvanced_116IndexSemantics(t *testing.T) {
 	features := sampleFeaturesWithHistory()
 	m := &ONNXModel{nFeatures: 116}
-	tensor := m.featuresToTensor(features)
+	tensor := mustFeaturesToTensor(t, m, features)
 
 	if len(tensor) != 116 {
 		t.Fatalf("tensor length = %d, want 116", len(tensor))
@@ -126,52 +131,115 @@ func TestFeaturesToTensorAdvanced_116IndexSemantics(t *testing.T) {
 	}
 }
 
-// Unsupported widths (100/106/110/144) have no defined layout. LoadONNXModel
-// rejects them; the extraction helper is defensive and must return an all-zero
-// tensor of the requested length rather than a truncated/misaligned one or a
-// panic, so a bug that reaches it fails observably and enforcement-safe.
-func TestFeaturesToTensorAdvanced_UnsupportedWidthZeroed(t *testing.T) {
-	features := sampleFeaturesWithHistory()
-	for _, size := range []int{100, 106, 110, 144} {
-		size := size
-		t.Run(sizeLabel(size), func(t *testing.T) {
-			m := &ONNXModel{nFeatures: size}
-			var tensor []float32
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						t.Fatalf("featuresToTensor panicked for nFeatures=%d: %v", size, r)
-					}
-				}()
-				tensor = m.featuresToTensor(features)
-			}()
-			if len(tensor) != size {
-				t.Fatalf("tensor length = %d, want %d", len(tensor), size)
+func mustFeaturesToTensor(t *testing.T, m *ONNXModel, features aidetection.MLFeatures) []float32 {
+	t.Helper()
+	tensor, err := m.featuresToTensor(features)
+	if err != nil {
+		t.Fatalf("featuresToTensor(nFeatures=%d): %v", m.nFeatures, err)
+	}
+	return tensor
+}
+
+func strongBotFeatures() aidetection.MLFeatures {
+	return aidetection.MLFeatures{
+		SignalCount:      40,
+		SignalRate:       20,
+		SignalDiversity:  6,
+		ThreatScore:      95,
+		IsKnownScanner:   true,
+		IsTor:            true,
+		ReputationScore:  90,
+		DetectionHistory: 10,
+		RequestRate:      500,
+		IsBursty:         true,
+		SignalTypeVector: map[aidetection.SignalType]int{
+			aidetection.SignalPortScanning:  10,
+			aidetection.SignalSYNFlood:      20,
+			aidetection.SignalHighFrequency: 10,
+		},
+		SourceVector: map[aidetection.SignalSource]int{aidetection.SourceTCP: 40},
+	}
+}
+
+func TestFeaturesToTensorRejectsInputWithoutLayout(t *testing.T) {
+	withHistory := sampleFeaturesWithHistory()
+	withoutHistory := sampleFeaturesWithHistory()
+	withoutHistory.EventHistory = nil
+
+	cases := []struct {
+		nFeatures int
+		features  aidetection.MLFeatures
+	}{
+		{126, withoutHistory},
+		{116, withoutHistory},
+		{100, withHistory},
+		{106, withHistory},
+		{110, withHistory},
+		{144, withHistory},
+		{50, withoutHistory},
+	}
+	for _, tc := range cases {
+		t.Run(strconv.Itoa(tc.nFeatures), func(t *testing.T) {
+			m := &ONNXModel{nFeatures: tc.nFeatures}
+			tensor, err := m.featuresToTensor(tc.features)
+			if !errors.Is(err, errNoFeatureLayout) {
+				t.Fatalf("err = %v, want errNoFeatureLayout", err)
 			}
-			for i, v := range tensor {
-				if v != 0 {
-					t.Fatalf("unsupported width %d: tensor[%d] = %v, want all zeros", size, i, v)
-				}
+			if tensor != nil {
+				t.Fatalf("tensor = %d values, want nil", len(tensor))
 			}
 		})
 	}
 }
 
-func sizeLabel(n int) string {
-	switch n {
-	case 100:
-		return "100"
-	case 106:
-		return "106"
-	case 110:
-		return "110"
-	case 116:
-		return "116"
-	case 126:
-		return "126"
-	case 144:
-		return "144"
-	default:
-		return "unknown"
+func TestFeaturesToTensorLegacyWidth(t *testing.T) {
+	m := &ONNXModel{nFeatures: 41}
+	if tensor := mustFeaturesToTensor(t, m, strongBotFeatures()); len(tensor) != 41 {
+		t.Fatalf("tensor length = %d, want 41", len(tensor))
+	}
+}
+
+func TestONNXPredictWithoutFeatureLayoutGivesNoVerdict(t *testing.T) {
+	m := &ONNXModel{nFeatures: 126}
+	before := testutil.ToFloat64(metrics.MLNoVerdict)
+
+	result := m.Predict(strongBotFeatures())
+
+	if !result.NoVerdict {
+		t.Fatalf("NoVerdict = false, want true: %+v", result)
+	}
+	if result.IsBot || result.Confidence != 0 || result.BotProbability != 0 {
+		t.Fatalf("no-verdict result carries a verdict: %+v", result)
+	}
+	if got := testutil.ToFloat64(metrics.MLNoVerdict) - before; got != 1 {
+		t.Fatalf("MLNoVerdict delta = %v, want 1", got)
+	}
+}
+
+func TestHybridPredictWithoutFeatureLayoutDoesNotScore(t *testing.T) {
+	h := &HybridModel{
+		onnxModel:        &ONNXModel{nFeatures: 126},
+		statisticalModel: NewSimpleThresholdModel(),
+	}
+
+	result := h.Predict(strongBotFeatures())
+
+	if result.IsBot || result.Confidence != 0 || result.BotProbability != 0 {
+		t.Fatalf("126-feature model without event history produced a score: %+v", result)
+	}
+}
+
+func TestNoVerdictLogIsRateLimited(t *testing.T) {
+	m := &ONNXModel{nFeatures: 126}
+	start := time.Unix(1_700_000_000, 0)
+
+	if !m.allowNoVerdictLog(start) {
+		t.Fatal("first no-verdict log must be allowed")
+	}
+	if m.allowNoVerdictLog(start.Add(noVerdictLogInterval - time.Second)) {
+		t.Fatal("second no-verdict log inside the interval must be suppressed")
+	}
+	if !m.allowNoVerdictLog(start.Add(noVerdictLogInterval)) {
+		t.Fatal("no-verdict log after the interval must be allowed")
 	}
 }

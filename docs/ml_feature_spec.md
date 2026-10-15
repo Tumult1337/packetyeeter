@@ -69,11 +69,12 @@ if X_df.shape[1] != expected_features:
 ```
 
 ### Go (onnx.go)
-```go
-if len(tensor) != m.nFeatures {
-    logrus.Error("CRITICAL: Feature count mismatch!")
-}
-```
+
+If the analyzer cannot build the vector for the model width, it does not run
+the model and does not pad the vector. The prediction is "no ML verdict". In
+the AI engine, the deterministic rules decide alone. At the reputation-block
+gate, "no ML verdict" vetoes the block. The analyzer increments
+`packetyeeter_ml_no_verdict_total` and logs one warning per minute at most.
 
 ## Common Pitfalls
 
