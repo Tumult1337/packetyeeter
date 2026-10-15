@@ -728,7 +728,7 @@ var (
 
 	MLNoVerdict = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "packetyeeter_ml_no_verdict_total",
-		Help: "ONNX predictions skipped because the input cannot be built for the model feature layout; the deterministic rules decide alone",
+		Help: "ONNX predictions skipped because the input cannot be built for the model feature layout; the AI engine uses the deterministic rules alone and the reputation-block gate vetoes the block",
 	})
 
 	MLBotDetections = promauto.NewCounter(prometheus.CounterOpts{

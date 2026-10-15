@@ -238,7 +238,7 @@ func (m *ONNXModel) recordNoVerdict(now time.Time, err error) {
 		return
 	}
 	logrus.WithError(err).WithField("n_features", m.nFeatures).Warn(
-		"ML model skipped: no ML verdict, deterministic rules decide alone")
+		"ML model skipped: no ML verdict; the AI engine uses the deterministic rules alone and the reputation-block gate vetoes the block")
 }
 
 func (m *ONNXModel) allowNoVerdictLog(now time.Time) bool {
