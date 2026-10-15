@@ -73,7 +73,8 @@ go test ./pkg/integration_test
 ```
 
 If you change `api/proto/v1/packetyeeter.proto`, run `make proto` and commit the
-updated generated files. If `buf` or protobuf plugins are missing, use
+updated generated files. Also run `make proto-lint proto-breaking`; never reuse
+or change field numbers (see [`docs/compatibility.md`](docs/compatibility.md)). If `buf` or protobuf plugins are missing, use
 `make install-buf`.
 
 If a validation command cannot run locally because the machine is not Linux or
@@ -205,6 +206,8 @@ Update:
 - `pkg/metrics/metrics.go`
 - Any collector/analyzer emit sites
 - `docs/observability.md`
+- `pkg/metrics/testdata/metrics.golden` (regenerate with
+  `go test ./pkg/metrics -run TestMetricNamesGolden -update-metrics-golden`)
 - `grafana-dashboard.json` only if the dashboard should display it
 
 Use labels carefully. High-cardinality labels should be disabled by default or

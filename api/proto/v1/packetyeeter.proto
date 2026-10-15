@@ -4,6 +4,19 @@ package packetyeeter.v1;
 
 option go_package = "PacketYeeter/api/proto/v1;apiv1";
 
+// Compatibility rules for packetyeeter.v1 (enforced in CI by `buf breaking`,
+// see api/proto/buf.yaml and docs/compatibility.md):
+//
+//   - Never change or reuse a field number, enum value number or field type.
+//     Collectors and analyzers of different versions talk to each other
+//     during rolling upgrades.
+//   - Do not rename or delete fields, enum values, messages or RPCs. To retire
+//     a field, mark it `[deprecated = true]`; if it must be deleted, add both
+//     its number and name to a `reserved` statement in the same message.
+//   - New fields, messages, enum values and RPCs are fine; old peers ignore
+//     unknown fields, so new fields must have a safe zero value.
+//   - Incompatible changes need a new package (packetyeeter.v2).
+
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";
 

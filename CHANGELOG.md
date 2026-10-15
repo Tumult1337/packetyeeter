@@ -16,6 +16,29 @@
   collector counts and whether the rule and watch APIs are enabled. It is not
   restricted by `-control-client-names`. No proto change.
 
+## 2026-10-15 - API compatibility guardrails
+
+No runtime behavior changes.
+
+- New [`docs/compatibility.md`](docs/compatibility.md) lists the stable,
+  operator-facing surface: the `packetyeeter.v1` gRPC API, metric names and
+  labels, `/metrics` and `/readyz`, inspector `/api/*` routes, CLI flags and
+  `*.default` variables, persisted state formats, eBPF C/Go struct layouts
+  and HAProxy SPOE names. Go APIs under `pkg/` are not part of it.
+- CI runs `buf lint` and `buf breaking` (FILE rules) on `api/proto` against
+  the pull request base. Lint rules that would need renaming existing v1
+  messages, RPC types or enum values are disabled. Locally: `make proto-lint`
+  and `make proto-breaking`.
+- `pkg/metrics/testdata/metrics.golden` pins every `packetyeeter_*` metric
+  name, kind and label set. Removing or renaming one fails
+  `TestMetricNamesGolden`; adding one needs the golden file regenerated
+  (`-update-metrics-golden`). `TestDashboardMetricsExist` checks that both
+  Grafana dashboards and `examples/prometheus-alerts.yml` only use defined
+  metrics.
+- `TestTypesMatchCLayout` pins sizes and field offsets of the eBPF Go mirror
+  structs in `pkg/collector/ebpf/types.go`. `make portable-test` now also runs
+  `./pkg/metrics` and `./pkg/collector/ebpf`.
+
 ## 2026-10-15 - Go 1.27.2 and golang.org/x/net v0.60.0
 
 - Build with Go 1.27.2 (go.mod, Dockerfile, `deploy.sh` with a pinned

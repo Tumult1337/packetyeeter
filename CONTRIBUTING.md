@@ -40,6 +40,7 @@ Thanks for helping improve PacketYeeter. Keep changes focused, operationally saf
 - For detection or blocking changes, describe the operational impact and include dry-run/tuning guidance.
 - Do not commit generated binaries, local dashboards, secrets, packet captures with real client data, or private IP intelligence exports.
 - Use `gofmt` on Go changes and keep generated protobuf updates in the same PR as the `.proto` change.
+- Do not break the compatibility surface in [`docs/compatibility.md`](docs/compatibility.md) (gRPC v1 proto, metric names/labels, flags, HTTP routes, persisted state, eBPF struct layouts, SPOE names). Run `make proto-lint proto-breaking` after `.proto` changes, and regenerate `pkg/metrics/testdata/metrics.golden` when adding metrics.
 
 ## LLM-assisted contributions
 

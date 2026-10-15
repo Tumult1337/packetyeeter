@@ -1,3 +1,25 @@
 version: v1
 deps:
   - buf.build/gogo/protobuf
+breaking:
+  # FILE is the strictest built-in category: it catches wire, JSON and
+  # generated-Go-source breaks (renames, removed fields/enum values, changed
+  # field numbers or types). Collectors and analyzers of different versions
+  # talk to each other during rolling upgrades, and pkg/* importers use the
+  # generated Go types, so all of these count as breaking.
+  use:
+    - FILE
+lint:
+  use:
+    - STANDARD
+  # The v1 API predates buf lint. These rules would require renaming
+  # existing packages, RPC request/response messages or enum values, which
+  # is itself a breaking change, so they are disabled rather than fixed.
+  # New messages, enums and RPCs should still follow the STANDARD naming.
+  except:
+    - PACKAGE_DIRECTORY_MATCH
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
