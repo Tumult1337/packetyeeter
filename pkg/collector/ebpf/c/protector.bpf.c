@@ -1015,6 +1015,8 @@ static __always_inline int check_l4_v4(struct xdp_md *ctx, struct iphdr *ip, voi
     }
 
     if (ip->protocol == IPPROTO_TCP) {
+        if (ip->frag_off & bpf_htons(IP_OFFSET))
+            return CHECK_STOP;
         struct tcphdr *tcp = ipv4_tcp_header(ip, data_end);
         if (!tcp) return CHECK_STOP;
         int scan_type = check_tcp_flags(tcp);
@@ -1065,7 +1067,7 @@ static __always_inline int check_l4_v6(struct xdp_md *ctx, __u8 l4_proto, void *
     }
 
     // IPv6 Fragment extension header. DROP mode keeps the legacy hard drop.
-    // RATE mode rate-limits first-fragment UDP and otherwise passes so
+    // RATE mode rate-limits every UDP fragment and otherwise passes so
     // low-MTU paths are not unconditionally blackholed.
     if (l4_proto == IP6_EXT_FRAGMENT) {
         if (udp_frag_mode() == UDP_FRAG_MODE_DROP) {
@@ -1074,10 +1076,8 @@ static __always_inline int check_l4_v6(struct xdp_md *ctx, __u8 l4_proto, void *
         } else {
             struct ip6_frag_hdr *fh = l4_hdr;
             if ((void *)(fh + 1) <= data_end) {
-                // Offset is the high 13 bits; M flag is bit 0. Offset 0 is
-                // the first fragment and still carries the upper-layer header.
-                __u16 fo = bpf_ntohs(fh->frag_off);
-                if ((fo & 0xFFF8) == 0 && fh->nexthdr == IPPROTO_UDP) {
+                // RFC 8200 4.5: every fragment of one packet carries the same Next Header.
+                if (fh->nexthdr == IPPROTO_UDP) {
                     __u32 limit = config_limit(CONFIG_KEY_UDP_LIMIT, DEFAULT_UDP_LIMIT);
                     __u8 first_trip = 0;
                     if (check_rate_limit(&udp_rates_v6, saddr, limit, now, &first_trip)) {
