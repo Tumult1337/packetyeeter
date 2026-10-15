@@ -158,6 +158,66 @@ control-plane RPCs. Because a collector certificate can then push rules for
 the whole fleet, set `-control-client-names` whenever collectors run on hosts
 you trust less than your controller.
 
+## Analyzer commands in `yeetctl`
+
+`yeetctl health`, `yeetctl rules push`, `yeetctl rules diff` and
+`yeetctl watch` talk to the analyzer's gRPC listener (`rules diff` only reads
+a local file). The connection flags match the collector's and go after the
+subcommand:
+
+| Flag | Default | Notes |
+|---|---|---|
+| `-analyzer-addr` | `127.0.0.1:9090` | Analyzer `-listen-addr`. |
+| `-analyzer-tls-ca` | empty | CA bundle that verifies the analyzer; enables TLS. |
+| `-analyzer-tls-cert`, `-analyzer-tls-key` | empty | Client certificate for mTLS. Must carry a name in `-control-client-names` for `rules push` and `watch` when that is set. |
+| `-analyzer-tls-server-name` | host of `-analyzer-addr` | Name to verify in the analyzer certificate. |
+| `-timeout` | `15s` | `health` and `rules push` only. |
+
+```bash
+TLS="-analyzer-addr analyzer.example:9090 -analyzer-tls-ca /etc/packetyeeter/tls/ca.pem \
+     -analyzer-tls-cert /etc/packetyeeter/tls/controller.pem -analyzer-tls-key /etc/packetyeeter/tls/controller-key.pem"
+
+yeetctl health $TLS            # add -json for the HealthResponse
+yeetctl rules push $TLS -dry-run rules.json
+yeetctl rules push $TLS rules.json
+sudo yeetctl rules diff -rule-state-dir /var/lib/packetyeeter rules.json
+yeetctl watch $TLS -json | jq .
+```
+
+- `health` prints whether the analyzer is serving, its version, start time and
+  components: `enforcement` (`enforcing`, `dry-run` or `stopped` by the kill
+  switch), connected collectors, and whether the rule and watch APIs are
+  enabled. It exits 0 when healthy, 1 when unhealthy or unreachable, 2 on
+  usage errors. `Health` is not a control-plane RPC: `-control-client-names`
+  does not restrict it, so any client that can connect can read these fields.
+  An analyzer older than this release answers `Unimplemented`.
+- `rules push <file|->` reads a `RuleSet` as protobuf JSON (field names as in
+  the proto or lowerCamelCase, enums by name, timestamps as RFC 3339) and
+  rejects unknown fields. `-scope` overrides the file's scope. The set
+  **replaces** every rule of the scope (see [Runtime rules](#runtime-rules));
+  a set without rules removes them all and needs `-allow-empty`. Before
+  sending, it runs the checks the analyzer runs on one scope (valid, unexpired
+  rules, unique ids, collector limits, 3 MiB); only the analyzer can check the
+  limits across all scopes. `-dry-run` stops there and prints the set that
+  would be sent, without connecting. The reported collector count is the
+  analyzer's `PushRulesAck.collectors`.
+- `rules diff <file|->` compares a rule file with `scrub-rules.json` in the
+  analyzer's `-rule-state-dir` (default `/var/lib/packetyeeter`): there is no
+  RPC that returns the live rules, and the state file is what the analyzer
+  last accepted. It exists only when the analyzer runs with `-rule-state-dir`
+  and has accepted a push. Run it on the analyzer host as a user that can read
+  the file (mode 0600). Rules in the file that have expired are ignored,
+  because the analyzer no longer sends them. It exits 0 when the scope matches,
+  1 when it differs, 2 on errors; `-json` prints the difference as JSON.
+- `watch` streams `WatchDecisions` until Ctrl-C (exit 0), one line per
+  decision: receive time, kind (`command`, `campaign`, `fingerprint`) and
+  fields. `-json` prints each `Decision` as one line of protobuf JSON
+  (NDJSON); `bytes` fields such as `ip` are base64 there. `-subscriber` sets
+  the name the analyzer logs (default `yeetctl@<hostname>`). Each `watch` uses
+  one of the analyzer's `-watch-max-subscribers` slots, and there is no
+  replay or reconnect: the command exits 1 when the stream ends with an error
+  (for example on analyzer restart or `-grpc-max-connection-age`).
+
 ## systemd hardening notes
 
 The analyzer is userspace-only and can run with normal hardening such as `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, and a narrow `ReadWritePaths=/var/lib/packetyeeter`.

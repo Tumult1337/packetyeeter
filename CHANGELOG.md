@@ -1,5 +1,21 @@
 # PacketYeeter Changelog
 
+## 2026-10-15 - yeetctl analyzer commands; analyzer answers Health
+
+- `yeetctl health`, `yeetctl rules push`, `yeetctl rules diff` and
+  `yeetctl watch` talk to the analyzer over gRPC with the collector's
+  `-analyzer-addr` and `-analyzer-tls-*` flags (mTLS supported). `rules push`
+  validates a `RuleSet` JSON file locally before sending and has `-dry-run`;
+  an empty set needs `-allow-empty`. `rules diff` compares a file with the
+  analyzer's persisted `scrub-rules.json`, since no RPC returns live rules.
+  `watch` streams `WatchDecisions` as text or NDJSON (`-json`) until Ctrl-C.
+  See [docs/operations.md](docs/operations.md#analyzer-commands-in-yeetctl).
+  Existing subcommands are unchanged.
+- The analyzer implements the `Health` RPC (it returned `Unimplemented`
+  before): serving state, version, start time, enforcement mode, connected
+  collector counts and whether the rule and watch APIs are enabled. It is not
+  restricted by `-control-client-names`. No proto change.
+
 ## 2026-10-15 - API compatibility guardrails
 
 No runtime behavior changes.
@@ -22,6 +38,7 @@ No runtime behavior changes.
 - `TestTypesMatchCLayout` pins sizes and field offsets of the eBPF Go mirror
   structs in `pkg/collector/ebpf/types.go`. `make portable-test` now also runs
   `./pkg/metrics` and `./pkg/collector/ebpf`.
+
 ## 2026-10-15 - Go 1.27.2 and golang.org/x/net v0.60.0
 
 - Build with Go 1.27.2 (go.mod, Dockerfile, `deploy.sh` with a pinned

@@ -3,12 +3,15 @@ package main
 import (
 	"PacketYeeter/pkg/analyzer/reputation"
 	"PacketYeeter/pkg/collector/ebpf"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"sort"
+	"syscall"
 	"time"
 )
 
@@ -52,11 +55,28 @@ func main() {
 		fmt.Println("  bots       - Show bot categorization summary")
 		fmt.Println("  nic-check [-role outside|inside] <iface>")
 		fmt.Println("             - Check a NIC for scrub mode and predict its throughput (local, read-only)")
+		fmt.Println("Analyzer commands (gRPC; see <command> -h for connection and TLS flags):")
+		fmt.Println("  health     - Show analyzer health")
+		fmt.Println("  rules push [-dry-run] <file>")
+		fmt.Println("             - Validate and push a RuleSet (JSON) to the analyzer")
+		fmt.Println("  rules diff <file>")
+		fmt.Println("             - Compare a RuleSet with the analyzer's persisted rule state (local)")
+		fmt.Println("  watch      - Stream analyzer decisions until interrupted")
 		os.Exit(1)
 	}
 	Command = args[0]
-	if Command == "nic-check" {
+	switch Command {
+	case "nic-check":
 		os.Exit(nicCheck(args[1:]))
+	case "health":
+		os.Exit(healthCmd(args[1:], os.Stdout, os.Stderr))
+	case "rules":
+		os.Exit(rulesCmd(args[1:], os.Stdout, os.Stderr))
+	case "watch":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := watchCmd(ctx, args[1:], os.Stdout, os.Stderr)
+		stop()
+		os.Exit(code)
 	}
 
 	conn, err := net.Dial("unix", SocketPath)
