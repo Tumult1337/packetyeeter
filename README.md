@@ -177,7 +177,7 @@ The `AnalyzerService` gRPC contract (`api/proto/v1/packetyeeter.proto`) exposes 
 | :--- | :--- | :--- |
 | `packetyeeter-collector` | `cmd/collector` | eBPF loader + enforcer, HAProxy Peer/SPOE, gRPC client. Root required. |
 | `packetyeeter-analyzer` | `cmd/analyzer` | AI/ML + reputation + threat-intel gRPC server. No privileges needed. |
-| `yeetctl` | `cmd/yeetctl` | CLI to inspect collector state over a UNIX socket. |
+| `yeetctl` | `cmd/yeetctl` | CLI to inspect collector state over a UNIX socket, and to check the analyzer, push rules and watch decisions over gRPC. |
 | `yeetexplorer` | `cmd/yeetexplorer` | Interactive terminal (TUI) dashboard for live inspection. |
 | `labeler` | `cmd/labeler` | Offline tool to label captured sessions for ML training. |
 
@@ -474,6 +474,19 @@ and bot summaries currently return empty collector-side state until analyzer
 state is exposed over the management API.
 
 For an interactive live view, run `yeetexplorer` (a terminal UI dashboard).
+
+`yeetctl` also talks to the **analyzer** over gRPC, with the collector's
+`-analyzer-addr` and `-analyzer-tls-*` flags after the subcommand:
+
+```bash
+yeetctl health -analyzer-addr analyzer:9090           # health and enforcement mode
+yeetctl rules push -analyzer-addr analyzer:9090 -dry-run rules.json
+yeetctl rules push -analyzer-addr analyzer:9090 rules.json
+sudo yeetctl rules diff rules.json                    # vs the analyzer's -rule-state-dir
+yeetctl watch -analyzer-addr analyzer:9090 -json      # stream decisions (NDJSON)
+```
+
+See [docs/operations.md](docs/operations.md#analyzer-commands-in-yeetctl).
 
 `yeetctl nic-check [-role outside|inside] <iface>` runs locally, without the
 collector socket, and only reads state. It reports a NIC's driver, firmware,
