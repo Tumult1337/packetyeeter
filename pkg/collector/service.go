@@ -1,13 +1,13 @@
 package collector
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -168,8 +168,11 @@ type Collector struct {
 	prevEgressBytesV6 map[[16]byte]prevEgress
 
 	// SYN timestamp cache for eBPF <-> SPOE correlation
-	synCache    sync.Map // IP string -> time.Time
-	synCacheTTL time.Duration
+	synCache        sync.Map // netip.Addr -> time.Time
+	synCacheTTL     time.Duration
+	synCacheEnabled bool
+
+	incidentLog incidentLog
 
 	// SPOE agent
 	spoeAgent *spoe.CollectorAgent
@@ -227,6 +230,7 @@ func New(cfg Config, logger *logrus.Logger) (*Collector, error) {
 		analyzerReady:      newAnalyzerReadiness(cfg.ReadyzAnalyzerGrace),
 		signalQueue:        make(chan *apiv1.Signal, max(cfg.SignalQueueSize, 10000)), // Ring buffer default 10k
 		synCacheTTL:        60 * time.Second,                                          // TTL for SYN timestamp cache
+		synCacheEnabled:    cfg.Mode != ebpf.ModeScrub,
 		prevICMPRates:      make(map[uint32]prevRate),
 		prevUDPRates:       make(map[uint32]prevRate),
 		prevICMPRatesV6:    make(map[[16]byte]prevRate),
@@ -901,6 +905,7 @@ func (c *Collector) startPerfEventReader() error {
 func (c *Collector) readPerfEvents() {
 	defer c.wg.Done()
 
+	var record perf.Record
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -908,15 +913,17 @@ func (c *Collector) readPerfEvents() {
 		default:
 		}
 
-		record, err := c.perfReader.Read()
-		if err != nil {
+		if err := c.perfReader.ReadInto(&record); err != nil {
 			if c.ctx.Err() != nil {
 				return // Shutting down
 			}
 			c.Logger.WithError(err).Debug("Error reading perf event")
 			continue
 		}
-		c.recordPerfLostSamples("tcp_metadata", record.LostSamples)
+		if record.LostSamples > 0 {
+			c.recordPerfLostSamples("tcp_metadata", record.LostSamples)
+			continue
+		}
 
 		c.processPerfEvent(record.RawSample)
 	}
@@ -924,22 +931,15 @@ func (c *Collector) readPerfEvents() {
 
 // processPerfEvent processes a single perf event containing TCP metadata
 func (c *Collector) processPerfEvent(data []byte) {
-	var meta ebpf.EventMetadata
-	reader := bytes.NewReader(data)
-	if err := binary.Read(reader, binary.LittleEndian, &meta); err != nil {
+	meta, err := ebpf.DecodeEventMetadata(data)
+	if err != nil {
+		metrics.PerfShortRecords.WithLabelValues("tcp_metadata").Inc()
 		c.Logger.WithError(err).Debug("Failed to parse perf event")
 		return
 	}
 
-	// Build IP address
-	var ip net.IP
-	if meta.IsV6 == 1 {
-		ip = net.IP(meta.SaddrV6[:])
-	} else {
-		ipBytes := make([]byte, 4)
-		binary.LittleEndian.PutUint32(ipBytes, meta.SaddrV4)
-		ip = net.IP(ipBytes)
-	}
+	addr := meta.SourceAddr()
+	ip := net.IP(addr.AsSlice())
 
 	// Skip allowlisted IPs
 	if c.checkAllowlist(ip) {
@@ -948,8 +948,8 @@ func (c *Collector) processPerfEvent(data []byte) {
 
 	// If this is a SYN packet (type=1), store timestamp for later correlation with SPOE
 	// TCP flags: SYN=0x02, check if SYN is set and ACK is not (to distinguish from SYN-ACK)
-	if meta.Type == 1 && (meta.TcpFlags&0x02) != 0 && (meta.TcpFlags&0x10) == 0 {
-		c.storeSynTimestamp(ip)
+	if c.synCacheEnabled && meta.Type == 1 && (meta.TcpFlags&0x02) != 0 && (meta.TcpFlags&0x10) == 0 {
+		c.storeSynTimestamp(addr)
 		if c.Logger.IsLevelEnabled(logrus.DebugLevel) {
 			c.Logger.WithFields(logrus.Fields{
 				"ip":        ip.String(),
@@ -971,7 +971,7 @@ func (c *Collector) processPerfEvent(data []byte) {
 
 	// Create signal with TCP metadata
 	signal := &apiv1.Signal{
-		Id:        fmt.Sprintf("tcp-meta-%s-%d", ip.String(), meta.Seq),
+		Id:        tcpMetaSignalID(addr, meta.Seq),
 		Timestamp: timestamppb.Now(),
 		Type:      apiv1.SignalType_SIGNAL_TCP_METADATA,
 		Source:    apiv1.SignalSource_SOURCE_EBPF,
@@ -1006,8 +1006,9 @@ func (c *Collector) startIncidentReader() error {
 	}
 
 	c.incidentReader = reader
-	c.wg.Add(1)
+	c.wg.Add(2)
 	go c.readIncidentEvents()
+	go c.reportIncidentSummaries()
 
 	c.Logger.Info("Started perf event reader for structured incident logging")
 	return nil
@@ -1017,6 +1018,7 @@ func (c *Collector) startIncidentReader() error {
 func (c *Collector) readIncidentEvents() {
 	defer c.wg.Done()
 
+	var record perf.Record
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -1024,15 +1026,17 @@ func (c *Collector) readIncidentEvents() {
 		default:
 		}
 
-		record, err := c.incidentReader.Read()
-		if err != nil {
+		if err := c.incidentReader.ReadInto(&record); err != nil {
 			if c.ctx.Err() != nil {
 				return // Shutting down
 			}
 			c.Logger.WithError(err).Debug("Error reading incident event")
 			continue
 		}
-		c.recordPerfLostSamples("incidents", record.LostSamples)
+		if record.LostSamples > 0 {
+			c.recordPerfLostSamples("incidents", record.LostSamples)
+			continue
+		}
 
 		c.processIncidentEvent(record.RawSample)
 	}
@@ -1049,45 +1053,44 @@ func (c *Collector) recordPerfLostSamples(reader string, lost uint64) {
 	}).Warn("Kernel perf-ring samples lost")
 }
 
-// processIncidentEvent decodes a single structured incident event and logs
-// it. This is purely a local audit-trail/metrics feature: it does not
-// generate an analyzer signal, since the underlying drop conditions
-// (bad flags, ICMP/UDP rate limits) already have dedicated signal types.
+// processIncidentEvent decodes a single structured incident event, counts
+// it, and logs the first incident of each reason per summary interval. This
+// is purely a local audit-trail/metrics feature: it does not generate an
+// analyzer signal, since the underlying drop conditions (bad flags, ICMP/UDP
+// rate limits) already have dedicated signal types.
 func (c *Collector) processIncidentEvent(data []byte) {
-	var inc ebpf.IncidentEvent
-	reader := bytes.NewReader(data)
-	if err := binary.Read(reader, binary.LittleEndian, &inc); err != nil {
+	inc, err := ebpf.DecodeIncidentEvent(data)
+	if err != nil {
+		metrics.PerfShortRecords.WithLabelValues("incidents").Inc()
 		c.Logger.WithError(err).Debug("Failed to parse incident event")
 		return
 	}
 
-	var ip net.IP
-	if inc.IsV6 == 1 {
-		ip = net.IP(inc.SaddrV6[:])
-	} else {
-		ipBytes := make([]byte, 4)
-		binary.LittleEndian.PutUint32(ipBytes, inc.SaddrV4)
-		ip = net.IP(ipBytes)
+	slot := incidentReasonSlot(inc.Reason)
+	c.incidentLog.counter(slot).Inc()
+	if !c.incidentLog.firstInInterval(slot) {
+		return
 	}
 
-	reason := ebpf.IncidentReasonName(inc.Reason)
-	metrics.KernelIncidents.WithLabelValues(reason).Inc()
-
 	c.Logger.WithFields(logrus.Fields{
-		"ip":               ip.String(),
-		"reason":           reason,
+		"ip":               inc.SourceAddr().Unmap().String(),
+		"reason":           ebpf.IncidentReasonName(slot),
 		"kernel_timestamp": inc.Timestamp,
 	}).Warn("Kernel-space enforcement incident")
 }
 
-func (c *Collector) storeSynTimestamp(ip net.IP) {
-	c.synCache.Store(ip.String(), time.Now())
+func (c *Collector) storeSynTimestamp(addr netip.Addr) {
+	c.synCache.Store(addr.Unmap(), time.Now())
 }
 
 // getSynTimestamp retrieves and removes the SYN timestamp for an IP
 // Returns the timestamp and true if found, otherwise zero time and false
 func (c *Collector) getSynTimestamp(ip net.IP) (time.Time, bool) {
-	val, ok := c.synCache.LoadAndDelete(ip.String())
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return time.Time{}, false
+	}
+	val, ok := c.synCache.LoadAndDelete(addr.Unmap())
 	if !ok {
 		return time.Time{}, false
 	}

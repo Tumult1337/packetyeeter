@@ -429,6 +429,11 @@ var (
 		Help: "Kernel perf-ring samples lost before userspace could read them",
 	}, []string{"reader"})
 
+	PerfShortRecords = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "packetyeeter_perf_short_records_total",
+		Help: "Kernel perf-ring records rejected because they are shorter than their struct",
+	}, []string{"reader"})
+
 	// AI Detection Engine Metrics (centralized)
 
 	AISignalsTotal = promauto.NewCounter(prometheus.CounterOpts{
