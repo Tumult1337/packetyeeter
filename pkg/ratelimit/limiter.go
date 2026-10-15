@@ -324,9 +324,10 @@ func (l *Limiter) AllowASN(asn string) bool {
 
 // Allow checks both IP and ASN rate limits
 func (l *Limiter) Allow(ip net.IP, asn string) bool {
-	ipAllowed := l.AllowIP(ip)
-	asnAllowed := l.AllowASN(asn)
-	return ipAllowed && asnAllowed
+	if !l.AllowIP(ip) {
+		return false
+	}
+	return l.AllowASN(asn)
 }
 
 // SetIPRate updates the per-IP rate limit, including for every currently

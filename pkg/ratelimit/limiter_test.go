@@ -298,3 +298,20 @@ func TestLimiterStopIsIdempotentAndKeepsLimiting(t *testing.T) {
 		t.Fatal("burst not enforced after Stop")
 	}
 }
+
+func TestAllowDeniedIPDoesNotDrainASNBucket(t *testing.T) {
+	l := NewLimiter(burstTestConfig())
+	const asn = "AS64500"
+	attacker := net.ParseIP("192.0.2.1")
+	victim := net.ParseIP("192.0.2.2")
+
+	for range 1000 {
+		l.Allow(attacker, asn)
+	}
+
+	for i := range 5 {
+		if !l.Allow(victim, asn) {
+			t.Fatalf("victim request %d denied after another IP of the same ASN was throttled", i)
+		}
+	}
+}
