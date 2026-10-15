@@ -166,6 +166,8 @@ type Collector struct {
 	// client moved during that poll rather than the counter's whole history.
 	prevEgressBytes   map[uint32]prevEgress
 	prevEgressBytesV6 map[[16]byte]prevEgress
+	lastEgressPoll    time.Time
+	now               func() time.Time
 
 	// SYN timestamp cache for eBPF <-> SPOE correlation
 	synCache    sync.Map // IP string -> time.Time
@@ -235,6 +237,7 @@ func New(cfg Config, logger *logrus.Logger) (*Collector, error) {
 		prevBadFlagsSeenV6: make(map[[16]byte]uint64),
 		prevEgressBytes:    make(map[uint32]prevEgress),
 		prevEgressBytesV6:  make(map[[16]byte]prevEgress),
+		now:                time.Now,
 	}
 	c.mapWalker.Logger = logger
 
