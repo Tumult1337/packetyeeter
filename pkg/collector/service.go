@@ -1930,29 +1930,24 @@ func (c *Collector) runBlockGC() {
 
 // gcExpiredBlocks removes expired blocks from eBPF maps
 func (c *Collector) gcExpiredBlocks() {
-	if c.Maps == nil || c.Maps.BlockedIPs == nil {
+	if c.Maps == nil || c.Maps.BlockedIPs == nil || c.Maps.BlockedIPsV6 == nil {
 		return
 	}
 
-	// ListBlockedIPs returns IPs with remaining TTL - we delete those with "expired" TTL
-	v4List, v6List := c.Maps.ListBlockedIPs(c.Config.BlockDuration)
-
-	for _, info := range v4List {
-		if info.RemainingTTL == "expired" {
-			ip := net.ParseIP(info.IP)
-			if ip != nil {
-				c.Maps.UnblockIP(ip)
-				c.Logger.WithField("ip", info.IP).Debug("GC: Unblocked expired IP")
-			}
-		}
+	expired, err := c.Maps.ExpiredBlocks(ebpf.MonotonicNowNs, c.Config.BlockDuration)
+	if err != nil {
+		c.Logger.WithError(err).Warn("GC: Skipped block expiry pass")
+		return
 	}
-	for _, info := range v6List {
-		if info.RemainingTTL == "expired" {
-			ip := net.ParseIP(info.IP)
-			if ip != nil {
-				c.Maps.UnblockIP(ip)
-				c.Logger.WithField("ip", info.IP).Debug("GC: Unblocked expired IPv6")
-			}
+
+	for _, block := range expired {
+		deleted, err := c.Maps.DeleteExpiredBlock(block)
+		if err != nil {
+			c.Logger.WithError(err).WithField("ip", block.Addr).Warn("GC: Failed to unblock expired IP")
+			continue
+		}
+		if deleted {
+			c.Logger.WithField("ip", block.Addr).Debug("GC: Unblocked expired IP")
 		}
 	}
 }

@@ -178,7 +178,12 @@ func (c *Collector) managementResponse(command string) any {
 		}
 		if c.Maps != nil {
 			if c.Maps.BlockedIPs != nil && c.Maps.BlockedIPsV6 != nil {
-				list.IPv4, list.IPv6 = c.Maps.ListBlockedIPs(c.Config.BlockDuration)
+				v4, v6, err := c.Maps.ListBlockedIPs(ebpf.MonotonicNowNs, c.Config.BlockDuration)
+				if err != nil {
+					c.Logger.WithError(err).Warn("Failed to list blocked IPs")
+				} else {
+					list.IPv4, list.IPv6 = v4, v6
+				}
 			}
 			list.MonitorMode = c.Maps.DryRun
 		}
