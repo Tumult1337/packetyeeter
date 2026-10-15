@@ -1,5 +1,13 @@
 # PacketYeeter Changelog
 
+## 2026-10-15 - Go 1.27.2 and golang.org/x/net v0.60.0
+
+- Build with Go 1.27.2 (go.mod, Dockerfile, `deploy.sh` with a pinned
+  checksum). It fixes standard library vulnerabilities in `net/http`,
+  `net/textproto`, `crypto/tls`, and `html/template` (GO-2026-6599 through
+  GO-2026-6617) reported by govulncheck.
+- Bump `golang.org/x/net` from v0.59.0 to v0.60.0 for the matching x/net fix.
+
 ## 2026-10-05 - Bounded block dedup; failed fan-out no longer suppresses
 
 Follow-up to #124.
