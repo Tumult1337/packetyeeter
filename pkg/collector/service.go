@@ -849,10 +849,7 @@ func (c *Collector) executeCommand(cmd *apiv1.Command) {
 func (c *Collector) pollMaps() {
 	defer c.wg.Done()
 
-	interval := c.Config.PollInterval
-	if interval == 0 {
-		interval = time.Second
-	}
+	interval := c.pollInterval()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -866,8 +863,9 @@ func (c *Collector) pollMaps() {
 		case <-ticker.C:
 			c.Logger.Debug("Polling eBPF maps for signals")
 			c.sendPendingHandshakes()
-			c.sendICMPRates()
-			c.sendUDPRates()
+			freshness := c.rateFreshness()
+			c.sendICMPRates(freshness)
+			c.sendUDPRates(freshness)
 			c.sendBadFlagsAlerts()
 			c.sendEgressVolume()
 			c.pruneStaleState()
@@ -1403,7 +1401,7 @@ func (c *Collector) sendPendingHandshakes() {
 }
 
 // sendICMPRates sends ICMP rate data to analyzer
-func (c *Collector) sendICMPRates() {
+func (c *Collector) sendICMPRates(freshness rateFreshness) {
 	if c.Maps == nil {
 		return
 	}
@@ -1420,8 +1418,8 @@ func (c *Collector) sendICMPRates() {
 				return true
 			}
 			c.observeRateClock(rate.LastTime)
-			pps := computePPS(c.prevICMPRates, ip, rate)
-			if pps < rateMinFloodPPS {
+			pps, flood := floodPPS(c.prevICMPRates, ip, rate, freshness)
+			if !flood {
 				return true
 			}
 			if p, sent := c.emitFloodSignal(ipv4FromKey(ip), pps, rate,
@@ -1450,8 +1448,8 @@ func (c *Collector) sendICMPRates() {
 				return true
 			}
 			c.observeRateClock(rate.LastTime)
-			pps := computePPSV6(c.prevICMPRatesV6, key, rate)
-			if pps < rateMinFloodPPS {
+			pps, flood := floodPPS(c.prevICMPRatesV6, key, rate, freshness)
+			if !flood {
 				return true
 			}
 			if p, sent := c.emitFloodSignal(net.IP(key[:]), pps, rate,
@@ -1475,7 +1473,7 @@ func (c *Collector) sendICMPRates() {
 }
 
 // sendUDPRates sends UDP rate data to analyzer
-func (c *Collector) sendUDPRates() {
+func (c *Collector) sendUDPRates(freshness rateFreshness) {
 	if c.Maps == nil {
 		return
 	}
@@ -1492,8 +1490,8 @@ func (c *Collector) sendUDPRates() {
 				return true
 			}
 			c.observeRateClock(rate.LastTime)
-			pps := computePPS(c.prevUDPRates, ip, rate)
-			if pps < rateMinFloodPPS {
+			pps, flood := floodPPS(c.prevUDPRates, ip, rate, freshness)
+			if !flood {
 				return true
 			}
 			if p, sent := c.emitFloodSignal(ipv4FromKey(ip), pps, rate,
@@ -1522,8 +1520,8 @@ func (c *Collector) sendUDPRates() {
 				return true
 			}
 			c.observeRateClock(rate.LastTime)
-			pps := computePPSV6(c.prevUDPRatesV6, key, rate)
-			if pps < rateMinFloodPPS {
+			pps, flood := floodPPS(c.prevUDPRatesV6, key, rate, freshness)
+			if !flood {
 				return true
 			}
 			if p, sent := c.emitFloodSignal(net.IP(key[:]), pps, rate,
@@ -1656,7 +1654,7 @@ func (c *Collector) sendBadFlagsAlerts() {
 	}
 }
 
-func computePPS(prev map[uint32]prevRate, ip uint32, rate ebpf.ICMPRate) float64 {
+func computePPS[K comparable](prev map[K]prevRate, ip K, rate ebpf.ICMPRate) float64 {
 	if prev == nil {
 		return float64(rate.Count)
 	}
@@ -1665,14 +1663,48 @@ func computePPS(prev map[uint32]prevRate, ip uint32, rate ebpf.ICMPRate) float64
 	return ppsFromWindow(pr, ok, rate)
 }
 
-// computePPSV6 mirrors computePPS for the [16]byte-keyed IPv6 rate maps.
-func computePPSV6(prev map[[16]byte]prevRate, ip [16]byte, rate ebpf.ICMPRate) float64 {
-	if prev == nil {
-		return float64(rate.Count)
+const bpfRateWindow = time.Second
+
+type rateFreshness struct {
+	nowNS  uint64
+	maxAge time.Duration
+	known  bool
+}
+
+func newRateFreshness(nowNS uint64, pollInterval time.Duration) rateFreshness {
+	return rateFreshness{nowNS: nowNS, maxAge: bpfRateWindow + pollInterval, known: true}
+}
+
+func (f rateFreshness) stale(lastTime uint64) bool {
+	if !f.known || lastTime >= f.nowNS {
+		return false
 	}
-	pr, ok := prev[ip]
-	storePrevRate(prev, ip, rate)
-	return ppsFromWindow(pr, ok, rate)
+	return f.nowNS-lastTime > uint64(f.maxAge)
+}
+
+func (c *Collector) rateFreshness() rateFreshness {
+	nowNS, err := monotonicNowNS()
+	if err != nil {
+		c.warnMapWalk("Failed to read monotonic clock for rate maps", err)
+		return rateFreshness{}
+	}
+	return newRateFreshness(nowNS, c.pollInterval())
+}
+
+func (c *Collector) pollInterval() time.Duration {
+	if c.Config.PollInterval <= 0 {
+		return time.Second
+	}
+	return c.Config.PollInterval
+}
+
+func floodPPS[K comparable](prev map[K]prevRate, ip K, rate ebpf.ICMPRate, freshness rateFreshness) (float64, bool) {
+	if freshness.stale(rate.LastTime) {
+		delete(prev, ip)
+		return 0, false
+	}
+	pps := computePPS(prev, ip, rate)
+	return pps, pps >= rateMinFloodPPS
 }
 
 // storePrevRate keeps a sample only when it could matter next poll. A stored
@@ -1730,7 +1762,7 @@ func ipv4FromKey(k uint32) net.IP {
 }
 
 // ppsFromWindow derives a pps estimate from the current and previous window
-// samples, shared by the v4 and v6 computePPS variants.
+// samples.
 func ppsFromWindow(pr prevRate, ok bool, rate ebpf.ICMPRate) float64 {
 	if !ok {
 		return float64(rate.Count)

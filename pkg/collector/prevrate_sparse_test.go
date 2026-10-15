@@ -112,11 +112,11 @@ func TestSparsePrevRateV6DropsSubThreshold(t *testing.T) {
 	prev := map[[16]byte]prevRate{}
 	var k [16]byte
 	k[0] = 0xfd
-	computePPSV6(prev, k, ebpf.ICMPRate{LastTime: 1, Count: 2000})
+	computePPS(prev, k, ebpf.ICMPRate{LastTime: 1, Count: 2000})
 	if _, ok := prev[k]; !ok {
 		t.Fatal("flooding source not tracked")
 	}
-	computePPSV6(prev, k, ebpf.ICMPRate{LastTime: 1, Count: 10})
+	computePPS(prev, k, ebpf.ICMPRate{LastTime: 1, Count: 10})
 	if _, ok := prev[k]; ok {
 		t.Fatal("sub-threshold source still tracked")
 	}
