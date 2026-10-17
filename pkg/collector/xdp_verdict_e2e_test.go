@@ -95,9 +95,14 @@ func vEth(proto uint16) []byte {
 }
 
 func vIPv4(proto byte, src, dst net.IP, l4 []byte) []byte {
+	return vIPv4Frag(proto, src, dst, 0, l4)
+}
+
+func vIPv4Frag(proto byte, src, dst net.IP, fragField uint16, l4 []byte) []byte {
 	ip := make([]byte, 20)
 	ip[0] = 0x45
 	binary.BigEndian.PutUint16(ip[2:], uint16(20+len(l4)))
+	binary.BigEndian.PutUint16(ip[6:], fragField)
 	ip[8] = 64
 	ip[9] = proto
 	copy(ip[12:16], src.To4())
@@ -449,5 +454,95 @@ func countPending[K any](t *testing.T, name string, m *ebpf.Map, want int) {
 	}
 	if n != want {
 		t.Errorf("%s: %d pending handshakes after %d SYNs, want one per SYN", name, n, want)
+	}
+}
+
+const (
+	ipv4MoreFragments = 0x2000
+	ipv6FragmentNext  = 44
+	ipv6MoreFragments = 0x0001
+	configKeyUDPLimit = uint32(2)
+)
+
+func vIPv6Frag(next byte, offsetUnits uint16, more bool, payload []byte) []byte {
+	b := make([]byte, 8, 8+len(payload))
+	b[0] = next
+	field := offsetUnits << 3
+	if more {
+		field |= ipv6MoreFragments
+	}
+	binary.BigEndian.PutUint16(b[2:], field)
+	binary.BigEndian.PutUint32(b[4:], 0xfeed)
+	return append(b, payload...)
+}
+
+func TestXDPIPv4TCPLaterFragmentSkipsFlagCheck(t *testing.T) {
+	for _, prog := range []string{"xdp_filter", "xdp_scrub"} {
+		t.Run(prog, func(t *testing.T) {
+			coll := loadPrograms(t, prog)
+			p := coll.Programs[prog]
+			src := net.ParseIP("198.51.100.91").To4()
+			const lastFragmentOffsetUnits = 185
+			pkt := vIPv4Frag(6, src, vDst4, lastFragmentOffsetUnits, vTCP(3000, tcpSYN|tcpFIN))
+			got := runProg(t, p, pkt, 1)
+			if got == xdpDrop {
+				t.Errorf("later fragment with SYN+FIN payload byte: verdict XDP_DROP")
+			}
+			if prog == "xdp_filter" && got != xdpPass {
+				t.Errorf("later fragment: verdict %d, want XDP_PASS", got)
+			}
+			var info badFlags
+			if err := coll.Maps["bad_flags"].Lookup(v4Key(src), &info); err == nil {
+				t.Errorf("later fragment made a bad_flags entry %+v", info)
+			}
+		})
+	}
+}
+
+func TestXDPIPv4TCPFirstFragmentKeepsFlagCheck(t *testing.T) {
+	for _, prog := range []string{"xdp_filter", "xdp_scrub"} {
+		t.Run(prog, func(t *testing.T) {
+			coll := loadPrograms(t, prog)
+			p := coll.Programs[prog]
+			src := net.ParseIP("198.51.100.92").To4()
+			pkt := vIPv4Frag(6, src, vDst4, ipv4MoreFragments, vTCP(3001, tcpSYN|tcpFIN))
+			if got := runProg(t, p, pkt, 1); got != xdpDrop {
+				t.Errorf("first fragment with SYN+FIN: verdict %d, want XDP_DROP", got)
+			}
+			var info badFlags
+			if err := coll.Maps["bad_flags"].Lookup(v4Key(src), &info); err != nil {
+				t.Errorf("first fragment with SYN+FIN: no bad_flags entry: %v", err)
+			}
+		})
+	}
+}
+
+func TestXDPIPv6UDPLaterFragmentFloodIsRateLimited(t *testing.T) {
+	for _, prog := range []string{"xdp_filter", "xdp_scrub"} {
+		t.Run(prog, func(t *testing.T) {
+			coll := loadPrograms(t, prog)
+			p := coll.Programs[prog]
+			const udpLimit = 10
+			if err := coll.Maps["config_map"].Put(configKeyUDPLimit, uint32(udpLimit)); err != nil {
+				t.Fatalf("set udp limit: %v", err)
+			}
+			src := net.ParseIP("2001:db8:1::91")
+			pkt := vIPv6(ipv6FragmentNext, src, vDst6, vIPv6Frag(17, 185, true, make([]byte, 64)))
+			if got := runProg(t, p, pkt, 5*udpLimit); got != xdpDrop {
+				t.Errorf("later UDP fragment flood past the limit: verdict %d, want XDP_DROP", got)
+			}
+			var rate struct {
+				LastTime        uint64
+				Count           uint64
+				IncidentEmitted uint8
+				Pad             [7]uint8
+			}
+			if err := coll.Maps["udp_rates_v6"].Lookup(v6Key(src), &rate); err != nil {
+				t.Fatalf("later UDP fragment flood: no udp_rates_v6 entry: %v", err)
+			}
+			if rate.Count <= udpLimit || rate.IncidentEmitted != 1 {
+				t.Errorf("udp_rates_v6 entry %+v, want count above %d and an incident", rate, udpLimit)
+			}
+		})
 	}
 }
