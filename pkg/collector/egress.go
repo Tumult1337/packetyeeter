@@ -29,6 +29,8 @@ const (
 	// window so a client that pauses mid-window is not treated as new (and
 	// therefore credited with its whole cumulative counter) when it resumes.
 	egressPrevStateTTL = 15 * time.Minute
+
+	egressMinWindow = 10 * time.Millisecond
 )
 
 // prevEgress is the last cumulative counter observed for one client, plus when
@@ -61,31 +63,19 @@ func (c *Collector) sendEgressVolume() {
 		return
 	}
 
-	now := time.Now()
-	window := c.Config.PollInterval
-	if window <= 0 {
-		window = time.Second
-	}
-	windowSeconds := window.Seconds()
+	now := c.now()
+	windowSeconds := egressWindowSeconds(c.lastEgressPoll, now, c.Config.PollInterval)
+	c.lastEgressPoll = now
 
 	sent := 0
 	var totalBytes uint64
 
 	if c.Maps.EgressBytes != nil {
-		err := ebpf.Walk(&c.mapWalker, c.Maps.EgressBytes, func(key uint32, total uint64) bool {
-			if sent >= egressMaxBatchSize {
-				return false
-			}
-			delta, ok := deltaEgress(c.prevEgressBytes, key, total, now)
-			if !ok {
-				return true
-			}
-			if c.emitEgressSignal(ipv4FromKey(key), delta, total, windowSeconds) {
-				totalBytes += delta
-				sent++
-			}
-			return true
-		})
+		walked, walkedBytes, err := pollEgressMap(c, c.prevEgressBytes, func(visit func(uint32, uint64) bool) error {
+			return ebpf.Walk(&c.mapWalker, c.Maps.EgressBytes, visit)
+		}, ipv4FromKey, now, windowSeconds)
+		sent += walked
+		totalBytes += walkedBytes
 		if err != nil {
 			c.warnMapWalk("Failed to walk IPv4 egress map", err)
 		}
@@ -95,20 +85,11 @@ func (c *Collector) sendEgressVolume() {
 	// cannot starve IPv6 emission on the same poll.
 	sentV6 := 0
 	if c.Maps.EgressBytesV6 != nil {
-		err := ebpf.Walk(&c.mapWalker, c.Maps.EgressBytesV6, func(key [16]byte, total uint64) bool {
-			if sentV6 >= egressMaxBatchSize {
-				return false
-			}
-			delta, ok := deltaEgress(c.prevEgressBytesV6, key, total, now)
-			if !ok {
-				return true
-			}
-			if c.emitEgressSignal(net.IP(key[:]), delta, total, windowSeconds) {
-				totalBytes += delta
-				sentV6++
-			}
-			return true
-		})
+		walked, walkedBytes, err := pollEgressMap(c, c.prevEgressBytesV6, func(visit func([16]byte, uint64) bool) error {
+			return ebpf.Walk(&c.mapWalker, c.Maps.EgressBytesV6, visit)
+		}, func(key [16]byte) net.IP { return net.IP(key[:]) }, now, windowSeconds)
+		sentV6 += walked
+		totalBytes += walkedBytes
 		if err != nil {
 			c.warnMapWalk("Failed to walk IPv6 egress map", err)
 		}
@@ -126,6 +107,37 @@ func (c *Collector) sendEgressVolume() {
 			"bytes": totalBytes,
 		}).Debug("Sent egress volume signals")
 	}
+}
+
+func pollEgressMap[K comparable](c *Collector, prev map[K]prevEgress, walk func(func(K, uint64) bool) error, toIP func(K) net.IP, now time.Time, windowSeconds float64) (int, uint64, error) {
+	sent := 0
+	var totalBytes uint64
+	err := walk(func(key K, total uint64) bool {
+		delta, ok := deltaEgress(prev, key, total, now)
+		if !ok || sent >= egressMaxBatchSize {
+			return true
+		}
+		if c.emitEgressSignal(toIP(key), delta, total, windowSeconds) {
+			totalBytes += delta
+			sent++
+		}
+		return true
+	})
+	return sent, totalBytes, err
+}
+
+func egressWindowSeconds(lastPoll, now time.Time, configured time.Duration) float64 {
+	if lastPoll.IsZero() {
+		if configured <= 0 {
+			configured = time.Second
+		}
+		return configured.Seconds()
+	}
+	elapsed := now.Sub(lastPoll)
+	if elapsed < egressMinWindow {
+		elapsed = egressMinWindow
+	}
+	return elapsed.Seconds()
 }
 
 // deltaEgress updates the shadow map for one client and reports how many bytes
