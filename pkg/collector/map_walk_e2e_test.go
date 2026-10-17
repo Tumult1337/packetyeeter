@@ -317,10 +317,11 @@ func BenchmarkPollICMPRatesSpoofed(b *testing.B) {
 		return uint32(0x0a000000 + i), ebpf.ICMPRate{LastTime: now, Count: 3}
 	})
 	c := quietCollector(&ebpf.Maps{ICMPRates: m})
+	freshness := newRateFreshness(now, time.Second)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		c.sendICMPRates()
+		c.sendICMPRates(freshness)
 	}
 	b.StopTimer()
 	b.ReportMetric(float64(len(c.prevICMPRates)), "prev-entries")
