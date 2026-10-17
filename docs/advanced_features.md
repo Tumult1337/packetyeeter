@@ -177,6 +177,18 @@ misaligned features into an enforcement model. Retrain/export to one of the
 supported widths, or add an explicit versioned layout (and matching tests)
 before deploying a new width.
 
+A 116 or 126-feature model needs the per-IP event history. If a caller has no
+event history, the analyzer does not run the model and does not pad the
+vector. The prediction is "no ML verdict". In the AI engine and the campaign
+confidence, the deterministic rules decide alone, the same as when no model is
+loaded. The reputation-block gate needs an ML confirmation, and "no ML
+verdict" does not confirm. The gate never has event history, so with a 116 or
+126-feature model, the gate vetoes each reputation-threshold block and
+increments `packetyeeter_ml_blocks_overridden_total`. Each skipped prediction
+increments
+`packetyeeter_ml_no_verdict_total`, and the analyzer logs one warning per
+minute at most.
+
 ## Usage
 
 ### Step 1: Extract Features

@@ -17,6 +17,52 @@ func (strongLegitStub) Predict(MLFeatures) MLPredictionResult {
 }
 func (strongLegitStub) Train(MLFeatures, bool) error { return nil }
 
+type noVerdictStub struct{}
+
+func (noVerdictStub) Predict(MLFeatures) MLPredictionResult {
+	return MLPredictionResult{NoVerdict: true, IsBot: true, Confidence: 0.99, BotProbability: 0.99, Category: BotCategoryScanner, ModelTier: "onnx"}
+}
+func (noVerdictStub) Train(MLFeatures, bool) error { return nil }
+
+func TestNoVerdictMLMatchesNoModel(t *testing.T) {
+	detect := func(model MLModel, ip net.IP) DetectionEvent {
+		t.Helper()
+		e := New(Config{
+			Workers:             1,
+			BufferSize:          100,
+			WarmupPeriod:        time.Nanosecond,
+			StaticThreshold:     3,
+			ConfidenceThreshold: 0.8,
+			MLModel:             model,
+		})
+		ch := make(chan DetectionEvent, 1)
+		e.RegisterDetectionHandler(testHandler{ch})
+		signals := []Signal{{Type: SignalWindowAnomaly, Source: SourceTCP, Weight: 5, IP: ip}}
+		for range 4 {
+			signals = append(signals, Signal{Type: SignalMissingAcceptLang, Source: SourceSPOE, Weight: 0.5, IP: ip})
+		}
+		e.handleDetection("ip:"+ip.String(), signals, 0, 0.85, 0)
+		select {
+		case ev := <-ch:
+			return ev
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("expected a detection event")
+			return DetectionEvent{}
+		}
+	}
+
+	withoutModel := detect(nil, net.ParseIP("203.0.113.221"))
+	withNoVerdict := detect(noVerdictStub{}, net.ParseIP("203.0.113.222"))
+
+	if withNoVerdict.Confidence != withoutModel.Confidence || withNoVerdict.WouldBlock != withoutModel.WouldBlock {
+		t.Fatalf("no-verdict ML changed the decision: no model confidence=%.4f block=%v, no verdict confidence=%.4f block=%v",
+			withoutModel.Confidence, withoutModel.WouldBlock, withNoVerdict.Confidence, withNoVerdict.WouldBlock)
+	}
+	if withNoVerdict.BotCategory != withoutModel.BotCategory {
+		t.Fatalf("no-verdict ML changed the category: %q, want %q", withNoVerdict.BotCategory, withoutModel.BotCategory)
+	}
+}
+
 // #66.1: a source that has crossed the reputation ban threshold is accumulated
 // deterministic evidence. Under the default ML integration, a strong-legitimate
 // ML verdict fed sparse inputs must not be able to permanently veto it: the

@@ -7,9 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	apiv1 "PacketYeeter/api/proto/v1"
 	"PacketYeeter/pkg/analyzer/aidetection"
 	"PacketYeeter/pkg/analyzer/reputation"
+	"PacketYeeter/pkg/metrics"
 	"PacketYeeter/pkg/patterns"
 )
 
@@ -66,6 +69,25 @@ func TestMLReputationGateIsOptionalAndUsesInclusiveThreshold(t *testing.T) {
 	}}
 	if a.mlConfirmsReputationBlock(ip, "AS64512", 100, "test") {
 		t.Fatal("prediction below configured threshold should veto block")
+	}
+}
+
+func TestMLReputationGateVetoesOnNoVerdict(t *testing.T) {
+	ip := net.ParseIP("192.0.2.1")
+	a := &Analyzer{Config: Config{AIConfidenceThreshold: 0.8}}
+	a.MLModel = stubMLModel{result: aidetection.MLPredictionResult{
+		NoVerdict:  true,
+		IsBot:      true,
+		Confidence: 0.99,
+		ModelTier:  "onnx",
+	}}
+	before := testutil.ToFloat64(metrics.MLBlocksOverridden)
+
+	if a.mlConfirmsReputationBlock(ip, "AS64512", 100, "test") {
+		t.Fatal("no-verdict prediction must veto the reputation block")
+	}
+	if got := testutil.ToFloat64(metrics.MLBlocksOverridden) - before; got != 1 {
+		t.Fatalf("MLBlocksOverridden delta = %v, want 1", got)
 	}
 }
 

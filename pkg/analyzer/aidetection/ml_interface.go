@@ -16,4 +16,5 @@ type MLPredictionResult struct {
 	BotProbability float64     // Probability of being a bot (0-1)
 	Category       BotCategory // Predicted bot category
 	ModelTier      string      // Which model tier made prediction: "pattern", "onnx", "statistical"
+	NoVerdict      bool
 }

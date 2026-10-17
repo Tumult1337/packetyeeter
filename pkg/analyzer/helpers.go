@@ -26,7 +26,7 @@ func (a *Analyzer) mlConfirmsReputationBlock(ip net.IP, asn string, score float6
 	}
 
 	prediction := a.MLModel.Predict(a.extractMLFeatures(ip, asn, score))
-	confirmed := prediction.IsBot && prediction.Confidence >= a.Config.AIConfidenceThreshold
+	confirmed := !prediction.NoVerdict && prediction.IsBot && prediction.Confidence >= a.Config.AIConfidenceThreshold
 	if !confirmed {
 		metrics.MLBlocksOverridden.Inc()
 	}

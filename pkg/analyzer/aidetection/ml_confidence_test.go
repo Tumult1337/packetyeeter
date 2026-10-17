@@ -13,6 +13,18 @@ func TestBlendMLConfidenceKeepsRuleFloor(t *testing.T) {
 	}
 }
 
+func TestBlendMLConfidenceIgnoresNoVerdict(t *testing.T) {
+	got := blendMLConfidence(0.62, MLPredictionResult{
+		NoVerdict:      true,
+		IsBot:          true,
+		Confidence:     0.99,
+		BotProbability: 0.99,
+	})
+	if got != 0.62 {
+		t.Fatalf("expected no-verdict prediction to keep rule confidence, got %.2f", got)
+	}
+}
+
 func TestBlendMLConfidenceRaisesBotConfidence(t *testing.T) {
 	got := blendMLConfidence(0.62, MLPredictionResult{
 		IsBot:          true,

@@ -91,9 +91,14 @@ func (h *HybridModel) Predict(features aidetection.MLFeatures) aidetection.MLPre
 	asn := features.GeoCountry
 	ja4h := features.JA4H
 
+	h.mu.RLock()
+	patternChecker := h.patternChecker
+	onnxModel := h.onnxModel
+	h.mu.RUnlock()
+
 	// 1. Check learned patterns first (fastest path)
-	if h.patternChecker != nil {
-		if matched, label, confidence, key := h.patternChecker.CheckPattern(userAgent, asn, ja4h); matched {
+	if patternChecker != nil {
+		if matched, label, confidence, key := patternChecker.CheckPattern(userAgent, asn, ja4h); matched {
 			h.mu.Lock()
 			h.patternMatches++
 			h.mu.Unlock()
@@ -124,13 +129,16 @@ func (h *HybridModel) Predict(features aidetection.MLFeatures) aidetection.MLPre
 	}
 
 	// 2. No pattern match - try ONNX for unknown patterns
-	if h.onnxModel != nil {
+	if onnxModel != nil {
 		h.mu.Lock()
 		h.onnxInferences++
 		h.mu.Unlock()
 
-		result := h.onnxModel.Predict(features)
+		result := onnxModel.Predict(features)
 		result.ModelTier = "onnx"
+		if result.NoVerdict {
+			return result
+		}
 
 		logrus.WithFields(logrus.Fields{
 			"bot_probability": result.BotProbability,
