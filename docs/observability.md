@@ -480,3 +480,19 @@ not deliver before the collector drained the perf ring. The bounded `reader`
 label is `tcp_metadata` or `incidents`. Any sustained increase means telemetry
 is incomplete; inspect collector CPU/load and incident volume before treating
 an absence of signals as clean traffic.
+
+`packetyeeter_perf_short_records_total{reader}` counts perf-ring records that
+the collector rejects because they are shorter than the kernel struct. It uses
+the same `reader` label. Any increase means the collector and the loaded eBPF
+object do not agree on the record layout.
+
+## Collector incident log
+
+The collector logs the first kernel incident of each reason in each 10-second
+interval as one `Warn` line, `Kernel-space enforcement incident`, with the
+fields `ip`, `reason`, and `kernel_timestamp`. If more incidents of that reason
+occur in the interval, it logs one `Warn` line at the end of the interval,
+`Kernel-space enforcement incident summary`, with the fields `reason`,
+`count`, and `interval`. `count` includes the first incident. Use
+`packetyeeter_kernel_incidents_total{reason}` for exact counts; it counts every
+incident record the collector receives.

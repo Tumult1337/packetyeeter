@@ -98,9 +98,7 @@ func IncidentReasonName(reason uint8) string {
 	}
 }
 
-// IncidentEvent mirrors `struct incident_event` in protector.bpf.c. Field
-// order and the explicit two-byte pad must stay in sync with the C struct
-// so binary.Read can decode the perf event's raw bytes directly.
+// IncidentEvent mirrors `struct incident_event` in protector.bpf.c; DecodeIncidentEvent reads its fields at the C offsets.
 type IncidentEvent struct {
 	Timestamp uint64
 	SaddrV4   uint32
@@ -110,7 +108,7 @@ type IncidentEvent struct {
 	_         [2]byte // padding, matches struct incident_event.pad
 }
 
-// EventMetadata matches the C struct event_metadata from protector.bpf.c
+// EventMetadata mirrors `struct event_metadata` in protector.bpf.c; DecodeEventMetadata reads its fields at the C offsets.
 type EventMetadata struct {
 	SaddrV6        [16]byte
 	SaddrV4        uint32
