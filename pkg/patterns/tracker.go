@@ -642,22 +642,34 @@ func (pt *PatternTracker) isMechanicalReuseTiming(timings []time.Duration) bool 
 		return false
 	}
 
-	// Calculate coefficient of variation (std/mean)
-	mean := pt.calculateMeanDuration(timings)
-	std := pt.calculateStdDev(timings)
-
-	if mean == 0 {
+	cv, ok := timingsCoefficientOfVariation(timings)
+	if !ok {
 		return false
 	}
-
-	cv := std / float64(mean.Milliseconds())
 
 	// Low coefficient of variation (<0.1) suggests mechanical timing
 	return cv < 0.1
 }
 
-func (pt *PatternTracker) calculateMeanDuration(timings []time.Duration) time.Duration {
-	return stats.CalculateMeanDuration(timings)
+func timingsCoefficientOfVariation(timings []time.Duration) (float64, bool) {
+	if len(timings) < 2 {
+		return 0, false
+	}
+	var sum float64
+	for _, t := range timings {
+		sum += float64(t)
+	}
+	mean := sum / float64(len(timings))
+	if mean <= 0 {
+		return 0, false
+	}
+	var varianceSum float64
+	for _, t := range timings {
+		diff := float64(t) - mean
+		varianceSum += diff * diff
+	}
+	std := math.Sqrt(varianceSum / float64(len(timings)-1))
+	return std / mean, true
 }
 
 func (pt *PatternTracker) calculateStdDev(timings []time.Duration) float64 {
