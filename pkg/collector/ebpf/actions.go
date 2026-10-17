@@ -2,10 +2,13 @@ package ebpf
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
@@ -52,7 +55,10 @@ func (m *Maps) BlockIP(ip net.IP, reason string, meta logrus.Fields) error {
 		logrus.WithFields(meta).Warn(reason)
 	}
 
-	now := getKTimeNs()
+	now, err := MonotonicNowNs()
+	if err != nil {
+		return fmt.Errorf("block %s: %w", ip, err)
+	}
 
 	if ip4 := ip.To4(); ip4 != nil {
 		key := binary.LittleEndian.Uint32(ip4)
@@ -73,23 +79,59 @@ func (m *Maps) BlockIP(ip net.IP, reason string, meta logrus.Fields) error {
 }
 
 func (m *Maps) UnblockIP(ip net.IP) error {
+	var err error
 	if ip4 := ip.To4(); ip4 != nil {
-		key := binary.LittleEndian.Uint32(ip4)
-		return m.BlockedIPs.Delete(key)
+		err = m.BlockedIPs.Delete(binary.LittleEndian.Uint32(ip4))
 	} else {
 		var key [16]byte
 		copy(key[:], ip.To16())
-		return m.BlockedIPsV6.Delete(key)
+		err = m.BlockedIPsV6.Delete(key)
 	}
+	if errors.Is(err, ebpf.ErrKeyNotExist) {
+		return nil
+	}
+	return err
 }
 
-func getKTimeNs() uint64 {
+type MonotonicClock func() (uint64, error)
+
+func MonotonicNowNs() (uint64, error) {
 	var ts unix.Timespec
-	err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
-	if err != nil {
-		return 0
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return 0, fmt.Errorf("read CLOCK_MONOTONIC: %w", err)
 	}
-	return uint64(ts.Nano())
+	return uint64(ts.Nano()), nil
+}
+
+func blockRemaining(now, blockedAt uint64, blockDuration time.Duration) (time.Duration, bool) {
+	if blockDuration <= 0 {
+		return 0, true
+	}
+	if blockedAt >= now {
+		return blockDuration, true
+	}
+	elapsed := now - blockedAt
+	durationNs := uint64(blockDuration)
+	if elapsed >= durationNs {
+		return 0, false
+	}
+	return time.Duration(durationNs - elapsed), true
+}
+
+func blockExpired(now, blockedAt uint64, blockDuration time.Duration) bool {
+	_, active := blockRemaining(now, blockedAt, blockDuration)
+	return !active
+}
+
+func remainingTTL(now, blockedAt uint64, blockDuration time.Duration) string {
+	if blockDuration <= 0 {
+		return "permanent"
+	}
+	remaining, active := blockRemaining(now, blockedAt, blockDuration)
+	if !active {
+		return "expired"
+	}
+	return remaining.Round(time.Second).String()
 }
 
 type BlockedIPInfo struct {
@@ -103,54 +145,128 @@ type BlockedIPList struct {
 	MonitorMode bool            `json:"monitor_mode"`
 }
 
-func (m *Maps) ListBlockedIPs(blockDuration time.Duration) ([]BlockedIPInfo, []BlockedIPInfo) {
-	var v4 []BlockedIPInfo
-	var v6 []BlockedIPInfo
+type blockMap interface {
+	iterate() entryIterator
+	Lookup(key, valueOut any) error
+	Delete(key any) error
+	String() string
+}
 
-	now := getKTimeNs()
-	blockDurationNs := uint64(blockDuration.Nanoseconds())
+type blockKey interface {
+	uint32 | [16]byte
+}
 
-	// Iterate IPv4
-	var key4 uint32
-	var valFn uint64
-	iter4 := m.BlockedIPs.Iterate()
-	for iter4.Next(&key4, &valFn) {
-		elapsed := now - valFn
-		var ttl string
-		if elapsed < blockDurationNs {
-			remaining := time.Duration(blockDurationNs-elapsed) * time.Nanosecond
-			ttl = remaining.Round(time.Second).String()
-		} else {
-			ttl = "expired"
-		}
+func v4KeyAddr(key uint32) netip.Addr {
+	var octets [4]byte
+	binary.LittleEndian.PutUint32(octets[:], key)
+	return netip.AddrFrom4(octets)
+}
 
-		bytes := make([]byte, 4)
-		binary.LittleEndian.PutUint32(bytes, key4)
+func v6KeyAddr(key [16]byte) netip.Addr {
+	return netip.AddrFrom16(key)
+}
 
-		v4 = append(v4, BlockedIPInfo{
-			IP:           net.IP(bytes).String(),
-			RemainingTTL: ttl,
-		})
+func listBlocks[K blockKey](m blockMap, toAddr func(K) netip.Addr, now uint64, blockDuration time.Duration) ([]BlockedIPInfo, error) {
+	var infos []BlockedIPInfo
+	var key K
+	var blockedAt uint64
+	iter := m.iterate()
+	for iter.Next(&key, &blockedAt) {
+		infos = append(infos, BlockedIPInfo{IP: toAddr(key).String(), RemainingTTL: remainingTTL(now, blockedAt, blockDuration)})
 	}
-
-	// Iterate IPv6
-	var key6 [16]byte
-	iter6 := m.BlockedIPsV6.Iterate()
-	for iter6.Next(&key6, &valFn) {
-		elapsed := now - valFn
-		var ttl string
-		if elapsed < blockDurationNs {
-			remaining := time.Duration(blockDurationNs-elapsed) * time.Nanosecond
-			ttl = remaining.Round(time.Second).String()
-		} else {
-			ttl = "expired"
-		}
-
-		v6 = append(v6, BlockedIPInfo{
-			IP:           net.IP(key6[:]).String(),
-			RemainingTTL: ttl,
-		})
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s: %w", m, err)
 	}
+	return infos, nil
+}
 
-	return v4, v6
+func (m *Maps) ListBlockedIPs(clock MonotonicClock, blockDuration time.Duration) ([]BlockedIPInfo, []BlockedIPInfo, error) {
+	now, err := clock()
+	if err != nil {
+		return nil, nil, fmt.Errorf("list blocked IPs: %w", err)
+	}
+	v4, err := listBlocks(ciliumMap{m.BlockedIPs}, v4KeyAddr, now, blockDuration)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list blocked IPv4: %w", err)
+	}
+	v6, err := listBlocks(ciliumMap{m.BlockedIPsV6}, v6KeyAddr, now, blockDuration)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list blocked IPv6: %w", err)
+	}
+	return v4, v6, nil
+}
+
+type ExpiredBlock struct {
+	Addr      netip.Addr
+	BlockedAt uint64
+}
+
+func expiredBlocks[K blockKey](m blockMap, toAddr func(K) netip.Addr, now uint64, blockDuration time.Duration) ([]ExpiredBlock, error) {
+	var expired []ExpiredBlock
+	var key K
+	var blockedAt uint64
+	iter := m.iterate()
+	for iter.Next(&key, &blockedAt) {
+		if blockExpired(now, blockedAt, blockDuration) {
+			expired = append(expired, ExpiredBlock{Addr: toAddr(key), BlockedAt: blockedAt})
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s: %w", m, err)
+	}
+	return expired, nil
+}
+
+func collectExpiredBlocks(v4, v6 blockMap, clock MonotonicClock, blockDuration time.Duration) ([]ExpiredBlock, error) {
+	now, err := clock()
+	if err != nil {
+		return nil, fmt.Errorf("expired blocks: %w", err)
+	}
+	expired4, err := expiredBlocks(v4, v4KeyAddr, now, blockDuration)
+	if err != nil {
+		return nil, fmt.Errorf("expired IPv4 blocks: %w", err)
+	}
+	expired6, err := expiredBlocks(v6, v6KeyAddr, now, blockDuration)
+	if err != nil {
+		return nil, fmt.Errorf("expired IPv6 blocks: %w", err)
+	}
+	return append(expired4, expired6...), nil
+}
+
+func (m *Maps) ExpiredBlocks(clock MonotonicClock, blockDuration time.Duration) ([]ExpiredBlock, error) {
+	return collectExpiredBlocks(ciliumMap{m.BlockedIPs}, ciliumMap{m.BlockedIPsV6}, clock, blockDuration)
+}
+
+func deleteIfUnchanged[K blockKey](m blockMap, key K, blockedAt uint64) (bool, error) {
+	var current uint64
+	if err := m.Lookup(key, &current); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("lookup %s: %w", m, err)
+	}
+	if current != blockedAt {
+		return false, nil
+	}
+	if err := m.Delete(key); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("delete %s: %w", m, err)
+	}
+	return true, nil
+}
+
+func deleteExpiredBlock(v4, v6 blockMap, block ExpiredBlock) (bool, error) {
+	if block.Addr.Is4() {
+		return deleteIfUnchanged(v4, binary.LittleEndian.Uint32(block.Addr.AsSlice()), block.BlockedAt)
+	}
+	if block.Addr.Is6() {
+		return deleteIfUnchanged(v6, block.Addr.As16(), block.BlockedAt)
+	}
+	return false, fmt.Errorf("delete expired block: invalid address %v", block.Addr)
+}
+
+func (m *Maps) DeleteExpiredBlock(block ExpiredBlock) (bool, error) {
+	return deleteExpiredBlock(ciliumMap{m.BlockedIPs}, ciliumMap{m.BlockedIPsV6}, block)
 }

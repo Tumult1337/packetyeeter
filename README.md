@@ -326,7 +326,7 @@ sudo ./packetyeeter-collector -i eth0 -analyzer-addr 127.0.0.1:9090
 | `-geoip-asn` | `""` | Path to `GeoLite2-ASN.mmdb` for ASN enrichment. |
 | `-allowlist` | `""` | Comma-separated CIDRs to bypass all filtering (IPv4/IPv6). |
 | `-policy` | `""` | Comma-separated per-CIDR policy overrides as `CIDR=action` (`block` or `monitor`), e.g. `203.0.113.0/24=block,198.51.100.0/24=monitor`. |
-| `-block-duration` | `5m` | Default duration to keep an IP blocked. |
+| `-block-duration` | `5m` | Default duration to keep an IP blocked. `0` or a negative value keeps each block until an unblock command removes it. |
 | `-poll-interval` | `1s` | How often to poll the eBPF maps. |
 | `-signal-queue-size` | `10000` | Collector → analyzer signal queue size. |
 | `-egress-accounting` | `false` | Enable per-client eBPF TC egress byte counters. Required for the analyzer's sustained-download **volume** path; off by default because it adds two per-client maps and a counter update per egress packet. |

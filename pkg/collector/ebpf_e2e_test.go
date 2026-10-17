@@ -41,6 +41,7 @@ import (
 	"google.golang.org/grpc"
 
 	apiv1 "PacketYeeter/api/proto/v1"
+	"PacketYeeter/pkg/collector/ebpf"
 )
 
 const testDummyIface = "pytyeet0"
@@ -149,7 +150,10 @@ func TestKernelBlockEnforcement(t *testing.T) {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		v4, _ := coll.Maps.ListBlockedIPs(cfg.BlockDuration)
+		v4, _, err := coll.Maps.ListBlockedIPs(ebpf.MonotonicNowNs, cfg.BlockDuration)
+		if err != nil {
+			t.Fatalf("ListBlockedIPs: %v", err)
+		}
 		for _, entry := range v4 {
 			if entry.IP == blockIP.String() {
 				return
